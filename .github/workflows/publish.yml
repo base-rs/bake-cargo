@@ -26,12 +26,12 @@ jobs:
         with:
           components: clippy, rustfmt
       - name: Install Bake launcher
-        run: cargo install socketry-cargo-bake --locked
-      - name: Detect a versioned release change
+        run: cargo install bake --locked
+      - name: Detect an explicit release request
         id: detect
         env:
           BAKE_BEFORE: ${{ github.event.pull_request.base.sha || github.event.before }}
-          BAKE_SHA: ${{ github.sha }}
+          BAKE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: cargo bake --locked cargo:release:detect --base "$BAKE_BEFORE" --sha "$BAKE_SHA"
       - name: Validate release candidate
         if: steps.detect.outputs.release == 'true'
@@ -60,7 +60,7 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - name: Install Bake launcher
-        run: cargo install socketry-cargo-bake --locked
+        run: cargo install bake --locked
       - name: Find workspace packages that need publishing
         id: packages
         env:

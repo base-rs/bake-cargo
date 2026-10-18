@@ -37,7 +37,15 @@ Projects using `socketry-project` get a standard hook that updates the license, 
 
 Review the changes made by the hook before committing the release.
 
-After updating the shared version and adding the matching release-notes heading, commit the version, release notes, and any other release changes. Then run `cargo:release` to validate and package the committed release candidate. It does not create a tag or publish anything. Open a pull request for review; the merge to the configured branch is the release request.
+After updating the shared version and adding the matching release-notes heading, commit the version, release notes, and any other release changes. Then run `cargo:release` to validate and package the committed release candidate. It does not create a tag or publish anything. Include exactly one Git trailer naming the intended tag in the final release commit:
+
+```text
+Bump patch version.
+
+Release: v0.5.0
+```
+
+The tag must be `v` followed by the exact Cargo workspace version. Keep the trailer on the latest commit of the release pull request, including after review fixes. Open a pull request for review. When squash merging, explicitly preserve the trailer at the end of the resulting commit message (for example, pass a body file containing the trailer to `gh pr merge --squash --body-file`). Rebase merging preserves the individual commit messages; the final commit must carry the trailer. A missing trailer means no release, even when the version changed.
 
 ## GitHub workflow and repository settings
 
@@ -49,9 +57,11 @@ cargo bake cargo:setup:workflow
 
 It refuses to replace a different existing file. Use `--force true` only after reviewing the generated output.
 
-The standard workflows have separate responsibilities. `test.yml` runs the project's tests and coverage checks on pull requests and pushes. `publish.yml` runs release validation, formatting, and Clippy on pull requests, but skips its ordinary test command because `test.yml` already tests the proposed changes. On pushes to `main`, `publish.yml` runs ordinary workspace tests in its `check` job before the `publish` job can start. `test.yml` also runs on pushes, so the branch gets both coverage results and the test run required before publishing. The `publish` job only runs after a successful check when the push contains a versioned release.
+The standard workflows have separate responsibilities. `test.yml` runs the project's tests and coverage checks on pull requests and pushes. `publish.yml` runs release validation, formatting, and Clippy on pull requests, but skips its ordinary test command because `test.yml` already tests the proposed changes. On pushes to `main`, `publish.yml` runs ordinary workspace tests in its `check` job before the `publish` job can start. `test.yml` also runs on pushes, so the branch gets both coverage results and the test run required before publishing. The `publish` job only runs after a successful check when the pushed tip commit requests a release.
 
-`cargo:release:detect` compares the workspace version with the pull request base or previous branch commit, validates the release heading, and reports whether a versioned release is ready. The `cargo:release` task packages the candidate on release changes. Ordinary commits do not publish. After merge, `cargo:publish:pending` checks which workspace packages still need that version; the workflow exchanges a GitHub OIDC token for a short-lived crates.io token only when uploads remain. `cargo:release:publish` publishes the remaining packages, creates and pushes the annotated `vVERSION` tag, and creates or updates the matching GitHub Release through `cargo:releases:github:release`. The workflow uses the GitHub environment `crates-io` and workflow file `publish.yml` by default.
+`cargo:release:detect --base BASE --sha SHA` reads the `Release: vVERSION` Git trailer from exactly the specified commit. Git parses the trailer block; subject text, prose examples, and ancestor commits do not request a release. Empty, duplicate, or mismatched release trailers fail validation. The checked-out workspace must have one shared version matching the tag and a matching release heading. The base comparison rejects a decreasing version for unchanged package names at the same manifest paths; a renamed package starts its own version history, and a version prepared in an earlier commit can be released without another bump.
+
+On pull requests the workflow reads the trailer from the PR head while validating the checked-out merge candidate. On pushes it reads the actual branch tip. Existing tags must point to the release commit, so rerunning that commit remains supported. The `cargo:release` task packages the candidate on release changes. Ordinary commits do not publish. After merge, `cargo:publish:pending` checks which workspace packages still need that version; the workflow exchanges a GitHub OIDC token for a short-lived crates.io token only when uploads remain. `cargo:release:publish` publishes the remaining packages, creates and pushes the annotated `vVERSION` tag, and creates or updates the matching GitHub Release through `cargo:releases:github:release`. The workflow uses the GitHub environment `crates-io` and workflow file `publish.yml` by default.
 
 Plan repository protections before applying them. Store the desired reviewers in the project's Cargo metadata so the setup task can apply them:
 
@@ -109,13 +119,19 @@ The Cargo release integration supports crates.io and GitHub Actions. It edits Ca
 
 ## Releasing
 
-Prepare a release with `cargo bake cargo:version:patch` (or `minor`, `major`, or `bump --version X.Y.Z`), then run `cargo bake cargo:release` and open a pull request. After review and merge, GitHub Actions publishes the release when the configured `crates-io` environment approves it, then creates or updates the matching GitHub Release from `releases.md`. Follow the shared [Releasing skill](https://github.com/socketry/socketry-project-rust/blob/main/context/releasing.md) for the standard process.
+Prepare a release with `cargo bake cargo:version:patch` (or `minor`, `major`, or `bump --version X.Y.Z`), commit it with a `Release: vVERSION` trailer, then run `cargo bake cargo:release` and open a pull request. After review and merge, GitHub Actions publishes the release when the configured `crates-io` environment approves it, then creates or updates the matching GitHub Release from `releases.md`. Follow the shared [Releasing skill](https://github.com/socketry/socketry-project-rust/blob/main/context/releasing.md) for the standard process.
 
 ## Releases
 
 <!-- bake-readme:releases:start -->
 
 See [releases.md](releases.md) for the full release history.
+
+### v0.5.0
+
+- Require an explicit `Release: vVERSION` Git trailer to request publication; version changes alone no longer trigger a release. Regenerate the publishing workflow to validate PR-head trailers against the merged candidate, and preserve the trailer when squash merging.
+- Allow renamed packages to begin their own version history.
+- Install the Bake launcher from the `bake` crate in generated publishing workflows.
 
 ### v0.4.3
 
@@ -127,10 +143,6 @@ See [releases.md](releases.md) for the full release history.
 - Require the aggregate test and coverage result for pull request merges.
 - Require publishing checks and test results by default when configuring repository protections.
 - Update Bake usage examples and agent context guidance.
-
-### v0.4.1
-
-- Treat a missing base Cargo manifest as the initial package release.
 
 <!-- bake-readme:releases:end -->
 

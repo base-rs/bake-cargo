@@ -536,8 +536,10 @@ reviewers = ["Team:123"]
 
         assert!(workflow.contains("cargo test --workspace --locked"));
         assert!(workflow.contains("id: detect"));
+        assert!(workflow.contains("github.event.pull_request.head.sha || github.sha"));
+        assert!(workflow.contains("BAKE_SHA: ${{ github.sha }}"));
         assert!(workflow.contains("github.event.pull_request.base.sha || github.event.before"));
-        assert!(workflow.contains("cargo install socketry-cargo-bake --locked"));
+        assert!(workflow.contains("cargo install bake --locked"));
         assert!(workflow.contains("cargo bake --locked cargo:release:detect"));
         assert!(workflow.contains("Validate release candidate"));
         assert!(workflow.contains("cargo bake --locked cargo:release"));

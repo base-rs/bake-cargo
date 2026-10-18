@@ -16,7 +16,7 @@ resolver = "3"
 manifest = "bake/Cargo.toml"
 
 [workspace.metadata.bake.release]
-reviewers = ["socketry/managers"]
+reviewers = ["core-rs/maintainers"]
 
 [lib]
 name = "bake_cargo"

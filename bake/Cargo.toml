@@ -5,6 +5,6 @@ edition = "2024"
 publish = false
 
 [dependencies]
-socketry-project = ">=0.3.9"
-bake = ">=0.19, <1"
-bake_cargo = { package = "bake-cargo", version = "0.5.0", path = ".." }
+core-project = ">=0.1.0"
+bake = ">=0.20, <1"
+bake_cargo = { package = "bake-cargo", version = "0.5.1", path = ".." }

@@ -2,8 +2,8 @@
 // Copyright, 2026, by Samuel Williams.
 
 use bake::{Context, Error, Result, Value};
+use core_markdown::{ParseOptions, mdast::Node, to_mdast};
 use serde_json::json;
-use socketry_markdown::{ParseOptions, mdast::Node, to_mdast};
 use std::fs;
 
 pub(crate) fn prepare(context: &Context, version: &str) -> Result<Value> {
@@ -52,7 +52,7 @@ pub(crate) fn contains_release_heading(release_notes: &str, version: &str) -> bo
 }
 
 fn contains_parsed_release_heading(
-    parsed: std::result::Result<Node, socketry_markdown::message::Message>,
+    parsed: std::result::Result<Node, core_markdown::message::Message>,
     version: &str,
 ) -> bool {
     let Ok(root) = parsed else {
@@ -81,7 +81,7 @@ fn contains_parsed_release_heading(
 #[cfg(test)]
 mod tests {
     use super::{contains_parsed_release_heading, contains_release_heading, prepare};
-    use socketry_markdown::mdast::{Node, Text};
+    use core_markdown::mdast::{Node, Text};
 
     #[test]
     fn requires_an_exact_release_heading() {
@@ -109,7 +109,7 @@ mod tests {
     #[test]
     fn treats_parser_errors_and_non_container_nodes_as_no_heading() {
         assert!(!contains_parsed_release_heading(
-            std::result::Result::Err(socketry_markdown::message::Message {
+            std::result::Result::Err(core_markdown::message::Message {
                 place: None,
                 reason: "invalid".to_owned(),
                 rule_id: Box::new("test".to_owned()),

@@ -1,5 +1,10 @@
 # Releases
 
+## v0.5.1
+
+- Use `core-markdown` in place of `socketry-markdown`.
+- Require `bake-license` and `bake-releases` versions that also use `core-markdown`.
+
 ## v0.5.0
 
 - Require an explicit `Release: vVERSION` Git trailer to request publication; version changes alone no longer trigger a release. Regenerate the publishing workflow to validate PR-head trailers against the merged candidate, and preserve the trailer when squash merging.

@@ -43,7 +43,7 @@ pub(crate) fn prepare(context: &Context, version: &str) -> Result<Value> {
         "version": version,
         "packages": packages.iter().map(|package| package.name.as_str()).collect::<Vec<_>>(),
         "status": "ready for a release pull request",
-        "next": "Commit the reviewed version, release notes, and any other release changes, then open a pull request. Merging it to the configured branch triggers publishing after the crates-io environment approval.",
+        "next": "Commit the reviewed release changes with a Release: vVERSION Git trailer matching the workspace version, then open a pull request. Preserve that trailer on the final merged commit to request publishing after the crates-io environment approval.",
     }))
 }
 

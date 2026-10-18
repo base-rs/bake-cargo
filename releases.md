@@ -1,5 +1,11 @@
 # Releases
 
+## v0.5.0
+
+- Require an explicit `Release: vVERSION` Git trailer to request publication; version changes alone no longer trigger a release. Regenerate the publishing workflow to validate PR-head trailers against the merged candidate, and preserve the trailer when squash merging.
+- Allow renamed packages to begin their own version history.
+- Install the Bake launcher from the `bake` crate in generated publishing workflows.
+
 ## v0.4.3
 
 - Align the readme title, release instructions, and related project links.

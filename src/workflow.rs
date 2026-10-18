@@ -11,55 +11,85 @@ use toml_edit::{DocumentMut, Item};
 use crate::cargo_support::{WorkspacePackage, run_cargo_arguments, workspace_packages};
 use crate::version_support::{Version, workspace_version};
 
-/// Detect a version change suitable for the standard publishing workflow.
+/// Detect an explicit release trailer and validate the checked-out release candidate.
 #[bake::task(name = "cargo:release:detect")]
 pub fn detect_release(context: &mut Context, base: String, sha: String) -> Result<Value> {
     if sha.is_empty() || sha.chars().any(char::is_control) {
         return Err(Error::new("release commit must be a nonempty Git revision"));
     }
 
+    let Some(tag) = release_trailer(context, &sha)? else {
+        return append_release_outputs(false, "", append_github_output);
+    };
     let current = workspace_version(context)?;
     let version = current.to_string();
-    let previous = previous_versions(context, &base)?;
-    let changed = match previous.as_deref() {
-        Some(previous) => {
-            let previous = Version::parse(previous)?;
-            if current < previous {
-                return Err(Error::new(format!(
-                    "workspace version {current} is lower than previous version {previous}"
-                )));
-            }
-            current > previous
-        }
-        None => true,
-    };
-
-    if changed {
-        if !crate::release::contains_release_heading(
-            &std::fs::read_to_string(context.root().join("releases.md"))
-                .map_err(|error| Error::new(format!("could not read releases.md: {error}")))?,
-            &version,
-        ) {
+    if tag != format!("v{version}") {
+        return Err(Error::new(format!(
+            "Release trailer must be 'Release: v{version}' to match the workspace version; found {tag:?}"
+        )));
+    }
+    if let Some(previous) = previous_versions(context, &base)? {
+        let previous = Version::parse(&previous)?;
+        if current < previous {
             return Err(Error::new(format!(
-                "releases.md must contain a '## v{version}' heading"
-            )));
-        }
-
-        let tag = format!("v{version}");
-        let reference = format!("refs/tags/{tag}");
-        let output = context
-            .command("git")
-            .args(["rev-list", "-n", "1", reference.as_str()])
-            .output()?;
-        if output.status.success() && String::from_utf8_lossy(&output.stdout).trim() != sha {
-            return Err(Error::new(format!(
-                "tag {tag} already exists at a different commit"
+                "workspace version {current} is lower than previous version {previous}"
             )));
         }
     }
 
-    let version = if changed { version } else { String::new() };
-    append_release_outputs(changed, &version, append_github_output)
+    if !crate::release::contains_release_heading(
+        &std::fs::read_to_string(context.root().join("releases.md"))
+            .map_err(|error| Error::new(format!("could not read releases.md: {error}")))?,
+        &version,
+    ) {
+        return Err(Error::new(format!(
+            "releases.md must contain a '## v{version}' heading"
+        )));
+    }
+
+    let reference = format!("refs/tags/{tag}");
+    let output = context
+        .command("git")
+        .args(["rev-list", "-n", "1", reference.as_str()])
+        .output()?;
+    if output.status.success() && String::from_utf8_lossy(&output.stdout).trim() != sha {
+        return Err(Error::new(format!(
+            "tag {tag} already exists at a different commit"
+        )));
+    }
+
+    append_release_outputs(true, &version, append_github_output)
+}
+
+fn release_trailer(context: &Context, sha: &str) -> Result<Option<String>> {
+    // Inspect exactly this commit, never an ancestor or a matching line in prose.
+    // `format:` avoids adding a newline: no trailer and an empty trailer stay distinct.
+    let output = context
+        .command("git")
+        .args([
+            "show",
+            "--no-patch",
+            "--format=format:%(trailers:key=Release,valueonly,unfold)",
+            "--end-of-options",
+            &format!("{sha}^{{commit}}"),
+            "--",
+        ])
+        .output()?;
+    if !output.status.success() {
+        return Err(Error::new(format!(
+            "could not read release commit {sha}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut trailers = text.lines();
+    let trailer = trailers.next();
+    if trailers.next().is_some() {
+        return Err(Error::new(
+            "release commit must contain exactly one Release trailer",
+        ));
+    }
+    Ok(trailer.map(str::to_owned))
 }
 
 fn append_release_outputs(
@@ -194,6 +224,13 @@ fn previous_versions(context: &Context, base: &str) -> Result<Option<String>> {
             continue;
         };
         let document = parse_manifest(&source, &relative.display().to_string())?;
+        let previous_name = document
+            .get("package")
+            .and_then(|package| package.get("name"))
+            .and_then(Item::as_str);
+        if previous_name != Some(package.name.as_str()) {
+            continue;
+        }
         if let Some(version) = package_version(&document, previous_workspace_version.as_deref()) {
             versions.push(version);
         }
@@ -388,8 +425,15 @@ mod tests {
     }
 
     fn commit(project: &Project) -> String {
+        commit_message(project, "Bump patch version.\n\nRelease: v1.2.3")
+    }
+
+    fn commit_message(project: &Project, message: &str) -> String {
         git_ok(project, &["add", "-A"]);
-        git_ok(project, &["commit", "--quiet", "-m", "update"]);
+        git_ok(
+            project,
+            &["commit", "--quiet", "--allow-empty", "-m", message],
+        );
         git_ok(project, &["rev-parse", "HEAD"])
     }
 
@@ -585,18 +629,13 @@ mod tests {
     fn reports_detect_release_metadata_previous_version_and_git_errors() {
         let mut environment = Environment::new();
         let metadata_failure = release_project("1.2.3");
+        initialize_git(&metadata_failure, false);
+        let sha = commit(&metadata_failure);
         environment.set(
             "CARGO",
             metadata_failure.root().join("missing-cargo").as_os_str(),
         );
-        assert!(
-            detect_release(
-                &mut context(&metadata_failure),
-                String::new(),
-                "deadbeef".to_owned(),
-            )
-            .is_err()
-        );
+        assert!(detect_release(&mut context(&metadata_failure), String::new(), sha,).is_err());
 
         let invalid_previous = release_project("not-a-version");
         let base = initialize_git(&invalid_previous, false);
@@ -606,8 +645,9 @@ mod tests {
         );
         invalid_previous.write("releases.md", "# Releases\n\n## v1.2.3\n\nNotes.\n");
         invalid_previous.cargo_proxy(&mut environment, None);
+        let sha = commit(&invalid_previous);
         assert!(
-            detect_release(&mut context(&invalid_previous), base, "deadbeef".to_owned(),)
+            detect_release(&mut context(&invalid_previous), base, sha)
                 .unwrap_err()
                 .to_string()
                 .contains("stable MAJOR.MINOR.PATCH")
@@ -662,8 +702,9 @@ mod tests {
             "Cargo.toml",
             "[package]\nname = \"fixture\"\nversion = \"1.2.2\"\nedition = \"2024\"\n",
         );
+        let sha = commit_message(&project, "Bump patch version.\n\nRelease: v1.2.2");
         assert!(
-            detect_release(&mut context, base.clone(), "new-sha".to_owned())
+            detect_release(&mut context, base.clone(), sha)
                 .unwrap_err()
                 .to_string()
                 .contains("lower than previous version")
@@ -674,15 +715,16 @@ mod tests {
             "[package]\nname = \"fixture\"\nversion = \"1.2.4\"\nedition = \"2024\"\n",
         );
         fs::remove_file(project.root().join("releases.md")).unwrap();
+        let sha = commit_message(&project, "Bump patch version.\n\nRelease: v1.2.4");
         assert!(
-            detect_release(&mut context, String::new(), "new-sha".to_owned())
+            detect_release(&mut context, String::new(), sha.clone())
                 .unwrap_err()
                 .to_string()
                 .contains("could not read releases.md")
         );
         project.write("releases.md", "# Releases\n\n## v1.2.3\n\nOld notes.\n");
         assert!(
-            detect_release(&mut context, String::new(), "new-sha".to_owned())
+            detect_release(&mut context, String::new(), sha.clone())
                 .unwrap_err()
                 .to_string()
                 .contains("must contain a '## v1.2.4' heading")
@@ -691,10 +733,151 @@ mod tests {
         project.write("releases.md", "# Releases\n\n## v1.2.4\n\nNew notes.\n");
         git_ok(&project, &["tag", "v1.2.4", &base]);
         assert!(
-            detect_release(&mut context, String::new(), "new-sha".to_owned())
+            detect_release(&mut context, String::new(), sha.clone())
                 .unwrap_err()
                 .to_string()
                 .contains("already exists at a different commit")
+        );
+    }
+
+    #[test]
+    fn reports_manifest_and_tag_lookup_failures_after_reading_the_trailer() {
+        let mut environment = Environment::new();
+        let project = release_project("1.2.3");
+        prepare_workspace(&project, &mut environment);
+        project.write("Cargo.toml", "not valid toml");
+        let base = initialize_git(&project, false);
+        project.single_package("fixture", "1.2.3");
+        let sha = commit(&project);
+        assert!(
+            detect_release(&mut context(&project), base, sha.clone())
+                .unwrap_err()
+                .to_string()
+                .contains("could not parse previous workspace")
+        );
+
+        let fake_git = project.executable("git", "#!/bin/sh\nprintf 'v1.2.3\\n'\n/bin/rm \"$0\"\n");
+        environment.set("PATH", fake_git.parent().unwrap().as_os_str());
+        assert!(detect_release(&mut context(&project), String::new(), sha).is_err());
+    }
+
+    #[test]
+    fn requires_one_exact_release_tag_trailer() {
+        let mut environment = Environment::new();
+        let project = release_project("1.2.3");
+        prepare_workspace(&project, &mut environment);
+        let base = initialize_git(&project, false);
+        for trailers in [
+            "Release:",
+            "Release: 1.2.3",
+            "Release: v1.2.4",
+            "Release: v01.2.3",
+            "Release: v1.2.3. Build it.",
+            "Release: v1.2.3\n extra text",
+            "Release: v1.2.3\nRelease: v1.2.3",
+            "Release: v1.2.3\nRelease: v1.2.4",
+        ] {
+            let sha = commit_message(&project, &format!("Bump patch version.\n\n{trailers}"));
+            let error = detect_release(&mut context(&project), base.clone(), sha).unwrap_err();
+            assert!(error.to_string().contains("Release"), "{trailers}: {error}");
+        }
+        for sha in ["missing-revision", "--all", "HEAD:Cargo.toml"] {
+            assert!(
+                detect_release(&mut context(&project), base.clone(), sha.to_owned())
+                    .unwrap_err()
+                    .to_string()
+                    .contains("could not read release commit")
+            );
+        }
+    }
+
+    #[test]
+    fn releases_prepared_versions_and_accepts_other_git_trailers() {
+        let mut environment = Environment::new();
+        let project = release_project("1.2.3");
+        prepare_workspace(&project, &mut environment);
+        let base = initialize_git(&project, false);
+        let sha = commit_message(
+            &project,
+            "Bump patch version.\n\nReviewed-by: Test User <test@example.com>\nRelease: v1.2.3\nSigned-off-by: Test User <test@example.com>",
+        );
+        git_ok(&project, &["tag", "v1.2.3", &sha]);
+        assert_eq!(
+            detect_release(&mut context(&project), base, sha).unwrap(),
+            json!({"release": true, "version": "1.2.3"})
+        );
+    }
+
+    #[test]
+    fn ignores_prose_version_changes_and_release_trailers_on_ancestors() {
+        let mut environment = Environment::new();
+        let project = release_project("1.2.2");
+        prepare_workspace(&project, &mut environment);
+        let base = initialize_git(&project, false);
+        project.single_package("fixture", "1.2.3");
+        commit(&project);
+        for message in [
+            "Bump patch version.",
+            "Release: v1.2.3",
+            "Document releases.\n\nRelease: v1.2.3\n\nThis is an example, not a trailer.",
+            "Document releases.\n\nExample: Release: v1.2.3",
+        ] {
+            let sha = commit_message(&project, message);
+            assert_eq!(
+                detect_release(&mut context(&project), base.clone(), sha).unwrap(),
+                json!({"release": false, "version": ""})
+            );
+        }
+    }
+
+    #[test]
+    fn detects_an_initial_release_after_renaming_a_package_and_resetting_its_version() {
+        let mut environment = Environment::new();
+        let project = release_project("1.2.3");
+        prepare_workspace(&project, &mut environment);
+        let base = initialize_git(&project, false);
+        project.single_package("renamed-fixture", "0.1.0");
+        project.write(
+            "releases.md",
+            "# Releases\n\n## v0.1.0\n\nInitial release.\n",
+        );
+        let sha = commit_message(&project, "Bump minor version.\n\nRelease: v0.1.0");
+        assert_eq!(
+            detect_release(&mut context(&project), base, sha).unwrap(),
+            json!({"release": true, "version": "0.1.0"})
+        );
+    }
+
+    #[test]
+    fn validates_the_merge_candidate_using_the_pull_request_head_trailer() {
+        let mut environment = Environment::new();
+        let project = release_project("1.2.3");
+        prepare_workspace(&project, &mut environment);
+        let base = initialize_git(&project, false);
+        git_ok(&project, &["checkout", "-b", "release"]);
+        let head = commit(&project);
+        git_ok(&project, &["checkout", "--detach", &base]);
+        project.write("unrelated.txt", "A concurrent main branch change.\n");
+        commit_message(&project, "Update main.");
+        git_ok(
+            &project,
+            &["merge", "--no-ff", "release", "-m", "Merge release branch."],
+        );
+        let merge = git_ok(&project, &["rev-parse", "HEAD"]);
+        assert_eq!(
+            detect_release(&mut context(&project), base.clone(), merge).unwrap(),
+            json!({"release": false, "version": ""})
+        );
+        assert_eq!(
+            detect_release(&mut context(&project), base.clone(), head.clone()).unwrap(),
+            json!({"release": true, "version": "1.2.3"})
+        );
+        project.single_package("fixture", "1.2.4");
+        assert!(
+            detect_release(&mut context(&project), base, head)
+                .unwrap_err()
+                .to_string()
+                .contains("match the workspace version")
         );
     }
 

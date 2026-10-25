@@ -1,5 +1,10 @@
 # Releases
 
+## v0.5.4
+
+- Depend on `base-markdown` under the `base-rs` organization, replacing `core-markdown`.
+- Require migrated Bake License and Bake Releases dependencies.
+
 ## v0.5.3
 
 - Support configurable release tag prefixes, including matching release notes, trailers, GitHub Releases, and tag protections. Existing projects continue to use `v` by default.

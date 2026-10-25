@@ -2,7 +2,7 @@
 // Copyright, 2026, by Samuel Williams.
 
 use bake::{Context, Error, Result, Value};
-use core_markdown::{
+use base_markdown::{
     Document, ParseOptions,
     stream::{EventKind, Tag},
 };

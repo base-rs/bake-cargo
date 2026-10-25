@@ -2,7 +2,10 @@
 // Copyright, 2026, by Samuel Williams.
 
 use bake::{Context, Error, Result, Value};
-use core_markdown::{ParseOptions, mdast::Node, to_mdast};
+use core_markdown::{
+    Document, ParseOptions,
+    stream::{EventKind, Tag},
+};
 use serde_json::json;
 use std::fs;
 
@@ -48,29 +51,18 @@ pub(crate) fn prepare(context: &Context, version: &str) -> Result<Value> {
 }
 
 pub(crate) fn contains_release_heading(release_notes: &str, version: &str) -> bool {
-    contains_parsed_release_heading(to_mdast(release_notes, &ParseOptions::default()), version)
-}
-
-fn contains_parsed_release_heading(
-    parsed: std::result::Result<Node, core_markdown::message::Message>,
-    version: &str,
-) -> bool {
-    let Ok(root) = parsed else {
-        return false;
-    };
-    let Some(children) = root.children() else {
-        return false;
-    };
+    let document = Document::parse(release_notes, &ParseOptions::default())
+        .expect("the built-in Markdown parser produces a valid document");
     let expected = format!("v{version}");
-
-    children.iter().any(|node| {
-        let Node::Heading(heading) = node else {
-            return false;
-        };
-        if heading.depth != 2 {
+    document.children(document.root()).any(|id| {
+        if !matches!(
+            document.node(id).unwrap().kind,
+            EventKind::Start(Tag::Heading(2))
+        ) {
             return false;
         }
-        node.text_content()
+        document
+            .text_content(id)
             .strip_prefix(&expected)
             .is_some_and(|remainder| {
                 remainder.is_empty() || remainder.chars().next().is_some_and(char::is_whitespace)
@@ -80,8 +72,7 @@ fn contains_parsed_release_heading(
 
 #[cfg(test)]
 mod tests {
-    use super::{contains_parsed_release_heading, contains_release_heading, prepare};
-    use core_markdown::mdast::{Node, Text};
+    use super::{contains_release_heading, prepare};
 
     #[test]
     fn requires_an_exact_release_heading() {
@@ -107,23 +98,10 @@ mod tests {
     }
 
     #[test]
-    fn treats_parser_errors_and_non_container_nodes_as_no_heading() {
-        assert!(!contains_parsed_release_heading(
-            std::result::Result::Err(core_markdown::message::Message {
-                place: None,
-                reason: "invalid".to_owned(),
-                rule_id: Box::new("test".to_owned()),
-                source: Box::new("test".to_owned()),
-            }),
-            "1.2.3"
-        ));
-        assert!(!contains_parsed_release_heading(
-            std::result::Result::Ok(Node::Text(Text {
-                value: "not a document".to_owned(),
-                position: None,
-            })),
-            "1.2.3"
-        ));
+    fn resolves_heading_markup_and_ignores_nested_headings() {
+        assert!(contains_release_heading("## **v1.2.3**\n", "1.2.3"));
+        assert!(contains_release_heading("## v1.2.&#51;\n", "1.2.3"));
+        assert!(!contains_release_heading("- ## v1.2.3\n", "1.2.3"));
     }
 
     #[test]

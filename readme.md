@@ -127,6 +127,10 @@ Prepare a release with `cargo bake cargo:version:patch` (or `minor`, `major`, or
 
 See [releases.md](releases.md) for the full release history.
 
+### v0.5.2
+
+- Migrate to the source-backed `core-markdown` document AST, preserving supported Markdown behavior and source bytes.
+
 ### v0.5.1
 
 - Use `core-markdown` in place of `socketry-markdown`.
@@ -137,10 +141,6 @@ See [releases.md](releases.md) for the full release history.
 - Require an explicit `Release: vVERSION` Git trailer to request publication; version changes alone no longer trigger a release. Regenerate the publishing workflow to validate PR-head trailers against the merged candidate, and preserve the trailer when squash merging.
 - Allow renamed packages to begin their own version history.
 - Install the Bake launcher from the `bake` crate in generated publishing workflows.
-
-### v0.4.3
-
-- Align the readme title, release instructions, and related project links.
 
 <!-- bake-readme:releases:end -->
 

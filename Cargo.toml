@@ -1,9 +1,9 @@
 [package]
 name = "bake-cargo"
-version = "0.5.3"
+version = "0.5.4"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/core-rs/bake-cargo"
+repository = "https://github.com/base-rs/bake-cargo"
 description = "Cargo project and release automation tasks for Bake"
 readme = "readme.md"
 include = ["src/**", "context/**", "Cargo.toml", "readme.md", "license.md", "releases.md"]
@@ -16,16 +16,16 @@ resolver = "3"
 manifest = "bake/Cargo.toml"
 
 [workspace.metadata.bake.release]
-reviewers = ["core-rs/maintainers"]
+reviewers = ["base-rs/maintainers"]
 
 [lib]
 name = "bake_cargo"
 
 [dependencies]
-core-markdown = "0.2.0"
+base-markdown = "0.1.0"
 bake = "0"
-bake-releases = "0.3.6"
-bake-license = "0.2.4"
+bake-releases = "0.3.7"
+bake-license = "0.2.5"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 ureq = { version = "2.12", features = ["json"] }

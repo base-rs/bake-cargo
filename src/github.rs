@@ -240,6 +240,7 @@ pub(crate) fn resolve_reviewers(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn setup_plan(
     repository: &Repository,
     branch: &str,
@@ -248,6 +249,7 @@ pub(crate) fn setup_plan(
     reviewers: &ReviewerSet,
     wait_timer: Option<u32>,
     environment: &str,
+    tag_prefix: &str,
 ) -> Value {
     let mut environment_settings = environment_payload(&reviewers.resolved, wait_timer, None);
     environment_settings["name"] = json!(environment);
@@ -255,7 +257,7 @@ pub(crate) fn setup_plan(
     json!({
         "repository": repository.full_name(),
         "branch_ruleset": branch_ruleset(branch, approvals, checks),
-        "tag_ruleset": tag_ruleset(),
+        "tag_ruleset": tag_ruleset(tag_prefix),
         "reviewers": {"configured": reviewers.configured, "resolved": reviewers.resolved},
         "environment": environment_settings,
         "preservation": "Existing environment settings are preserved unless overridden above.",
@@ -301,12 +303,16 @@ fn branch_ruleset(branch: &str, approvals: u32, checks: &[String]) -> JsonValue 
     })
 }
 
-fn tag_ruleset() -> JsonValue {
+fn tag_ruleset(prefix: &str) -> JsonValue {
+    let mut patterns = vec!["refs/tags/v*".to_owned()];
+    if prefix != "v" {
+        patterns.push(format!("refs/tags/{prefix}*"));
+    }
     json!({
         "name": "Socketry Cargo release tags",
         "target": "tag",
         "enforcement": "active",
-        "conditions": {"ref_name": {"include": ["refs/tags/v*"], "exclude": []}},
+        "conditions": {"ref_name": {"include": patterns, "exclude": []}},
         "rules": [{"type": "deletion"}],
         "bypass_actors": [],
     })
@@ -416,7 +422,7 @@ pub(crate) fn apply_setup(
     }
     let existing_environment = existing_environment(context, repository, environment)?;
     let branch_ruleset = branch_ruleset(branch, approvals, checks);
-    let tag_ruleset = tag_ruleset();
+    let tag_ruleset = tag_ruleset(&crate::release_tag::tag_prefix(context)?);
 
     let branch_result = upsert_ruleset(context, repository, &branch_ruleset)?;
     let tag_result = upsert_ruleset(context, repository, &tag_ruleset)?;
@@ -1148,12 +1154,17 @@ mod tests {
             &reviewers,
             Some(10),
             "crates-io",
+            "base-v",
         );
 
         assert_eq!(plan["repository"], "socketry/example");
         assert_eq!(plan["reviewers"]["configured"][0], "socketry/managers");
         assert_eq!(plan["environment"]["name"], "crates-io");
         assert_eq!(plan["environment"]["wait_timer"], 10);
+        assert_eq!(
+            plan["tag_ruleset"]["conditions"]["ref_name"]["include"],
+            json!(["refs/tags/v*", "refs/tags/base-v*"])
+        );
         assert_eq!(
             plan["branch_ruleset"]["rules"][0]["parameters"]["required_approving_review_count"],
             2
@@ -1374,7 +1385,7 @@ esac
             }])
         );
         assert_eq!(
-            tag_ruleset()["conditions"]["ref_name"]["include"][0],
+            tag_ruleset("v")["conditions"]["ref_name"]["include"][0],
             "refs/tags/v*"
         );
     }

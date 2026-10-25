@@ -10,6 +10,7 @@ use serde_json::json;
 use std::fs;
 
 pub(crate) fn prepare(context: &Context, version: &str) -> Result<Value> {
+    let tag = crate::release_tag(context, version)?;
     let packages = crate::cargo_support::workspace_packages(context)?;
     if packages.is_empty() {
         return Err(Error::new("the workspace has no publishable packages"));
@@ -22,14 +23,14 @@ pub(crate) fn prepare(context: &Context, version: &str) -> Result<Value> {
             release_notes_path.display()
         ))
     })?;
-    if !contains_release_heading(&release_notes, version) {
-        let heading = format!("## v{version}");
+    if !contains_release_heading(&release_notes, &tag) {
+        let heading = format!("## {tag}");
         return Err(Error::new(format!(
             "{} must contain a {heading:?} release heading",
             release_notes_path.display()
         )));
     }
-    bake_releases::extract_notes(&release_notes, &format!("v{version}")).map_err(|error| {
+    bake_releases::extract_notes(&release_notes, &tag).map_err(|error| {
         Error::new(format!(
             "could not extract release notes from {}: {error}",
             release_notes_path.display()
@@ -44,16 +45,16 @@ pub(crate) fn prepare(context: &Context, version: &str) -> Result<Value> {
 
     Ok(json!({
         "version": version,
+        "tag": tag,
         "packages": packages.iter().map(|package| package.name.as_str()).collect::<Vec<_>>(),
         "status": "ready for a release pull request",
-        "next": "Commit the reviewed release changes with a Release: vVERSION Git trailer matching the workspace version, then open a pull request. Preserve that trailer on the final merged commit to request publishing after the crates-io environment approval.",
+        "next": format!("Commit the reviewed release changes with a Release: {tag} Git trailer, then open a pull request. Preserve that trailer on the final merged commit to request publishing after the crates-io environment approval."),
     }))
 }
 
-pub(crate) fn contains_release_heading(release_notes: &str, version: &str) -> bool {
+pub(crate) fn contains_release_heading(release_notes: &str, tag: &str) -> bool {
     let document = Document::parse(release_notes, &ParseOptions::default())
         .expect("the built-in Markdown parser produces a valid document");
-    let expected = format!("v{version}");
     document.children(document.root()).any(|id| {
         if !matches!(
             document.node(id).unwrap().kind,
@@ -63,7 +64,7 @@ pub(crate) fn contains_release_heading(release_notes: &str, version: &str) -> bo
         }
         document
             .text_content(id)
-            .strip_prefix(&expected)
+            .strip_prefix(tag)
             .is_some_and(|remainder| {
                 remainder.is_empty() || remainder.chars().next().is_some_and(char::is_whitespace)
             })
@@ -78,30 +79,30 @@ mod tests {
     fn requires_an_exact_release_heading() {
         assert!(contains_release_heading(
             "## Unreleased\n\n## v1.2.3\n",
-            "1.2.3"
+            "v1.2.3"
         ));
         assert!(contains_release_heading(
             "## v1.2.3 - Improvements\n",
-            "1.2.3"
+            "v1.2.3"
         ));
-        assert!(!contains_release_heading("## v1.2.30\n", "1.2.3"));
-        assert!(!contains_release_heading("## v1.2.3-rc.1\n", "1.2.3"));
+        assert!(!contains_release_heading("## v1.2.30\n", "v1.2.3"));
+        assert!(!contains_release_heading("## v1.2.3-rc.1\n", "v1.2.3"));
         assert!(!contains_release_heading(
             "```markdown\n## v1.2.3\n```\n",
-            "1.2.3"
+            "v1.2.3"
         ));
-        assert!(!contains_release_heading("> ## v1.2.3\n", "1.2.3"));
+        assert!(!contains_release_heading("> ## v1.2.3\n", "v1.2.3"));
         assert!(!contains_release_heading(
             "A paragraph before a heading.\n",
-            "1.2.3"
+            "v1.2.3"
         ));
     }
 
     #[test]
     fn resolves_heading_markup_and_ignores_nested_headings() {
-        assert!(contains_release_heading("## **v1.2.3**\n", "1.2.3"));
-        assert!(contains_release_heading("## v1.2.&#51;\n", "1.2.3"));
-        assert!(!contains_release_heading("- ## v1.2.3\n", "1.2.3"));
+        assert!(contains_release_heading("## **v1.2.3**\n", "v1.2.3"));
+        assert!(contains_release_heading("## v1.2.&#51;\n", "v1.2.3"));
+        assert!(!contains_release_heading("- ## v1.2.3\n", "v1.2.3"));
     }
 
     #[test]
@@ -152,6 +153,7 @@ mod tests {
 
         let mut environment = Environment::new();
         let failed_metadata = Project::new();
+        failed_metadata.single_package("fixture", "1.2.3");
         let cargo = failed_metadata.executable(
             "cargo-failed",
             "#!/bin/sh\necho metadata denied >&2; exit 1\n",

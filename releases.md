@@ -1,5 +1,9 @@
 # Releases
 
+## v0.5.3
+
+- Support configurable release tag prefixes, including matching release notes, trailers, GitHub Releases, and tag protections. Existing projects continue to use `v` by default.
+
 ## v0.5.2
 
 - Migrate to the source-backed `core-markdown` document AST, preserving supported Markdown behavior and source bytes.

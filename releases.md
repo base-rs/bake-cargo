@@ -1,5 +1,9 @@
 # Releases
 
+## v0.5.2
+
+- Migrate to the source-backed `core-markdown` document AST, preserving supported Markdown behavior and source bytes.
+
 ## v0.5.1
 
 - Use `core-markdown` in place of `socketry-markdown`.

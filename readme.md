@@ -27,7 +27,7 @@ The `cargo:version:patch`, `cargo:version:minor`, and `cargo:version:major` task
 #[bake::task(name = "cargo:after_version_bump")]
 fn after_version_bump(context: &mut bake::Context, version: String) -> bake::Result<()> {
     context.call("license:update", &[])?;
-    let heading = format!("v{version}");
+    let heading = bake_cargo::release_tag(context, &version)?;
     context.call("releases:update", &[&heading])?;
     Ok(())
 }
@@ -45,7 +45,7 @@ Bump patch version.
 Release: v0.5.0
 ```
 
-The tag must be `v` followed by the exact Cargo workspace version. Keep the trailer on the latest commit of the release pull request, including after review fixes. Open a pull request for review. When squash merging, explicitly preserve the trailer at the end of the resulting commit message (for example, pass a body file containing the trailer to `gh pr merge --squash --body-file`). Rebase merging preserves the individual commit messages; the final commit must carry the trailer. A missing trailer means no release, even when the version changed.
+By default, the tag is `v` followed by the exact Cargo workspace version. Set `tag-prefix` in `[workspace.metadata.bake.release]` (or `[package.metadata.bake.release]` for a single package) to use a different prefix. For example, `tag-prefix = "base-v"` produces `base-v0.1.0`. Use the same full tag in the release-notes heading and the `Release:` trailer. Prefixes may contain ASCII letters, numbers, hyphens, and underscores, and must not start with a hyphen; an empty prefix is supported. Keep the trailer on the latest commit of the release pull request, including after review fixes. Open a pull request for review. When squash merging, explicitly preserve the trailer at the end of the resulting commit message (for example, pass a body file containing the trailer to `gh pr merge --squash --body-file`). Rebase merging preserves the individual commit messages; the final commit must carry the trailer. A missing trailer means no release, even when the version changed.
 
 ## GitHub workflow and repository settings
 
@@ -59,9 +59,9 @@ It refuses to replace a different existing file. Use `--force true` only after r
 
 The standard workflows have separate responsibilities. `test.yml` runs the project's tests and coverage checks on pull requests and pushes. `publish.yml` runs release validation, formatting, and Clippy on pull requests, but skips its ordinary test command because `test.yml` already tests the proposed changes. On pushes to `main`, `publish.yml` runs ordinary workspace tests in its `check` job before the `publish` job can start. `test.yml` also runs on pushes, so the branch gets both coverage results and the test run required before publishing. The `publish` job only runs after a successful check when the pushed tip commit requests a release.
 
-`cargo:release:detect --base BASE --sha SHA` reads the `Release: vVERSION` Git trailer from exactly the specified commit. Git parses the trailer block; subject text, prose examples, and ancestor commits do not request a release. Empty, duplicate, or mismatched release trailers fail validation. The checked-out workspace must have one shared version matching the tag and a matching release heading. The base comparison rejects a decreasing version for unchanged package names at the same manifest paths; a renamed package starts its own version history, and a version prepared in an earlier commit can be released without another bump.
+`cargo:release:detect --base BASE --sha SHA` reads the `Release: TAG` Git trailer from exactly the specified commit. Git parses the trailer block; subject text, prose examples, and ancestor commits do not request a release. Empty, duplicate, or mismatched release trailers fail validation. The checked-out workspace must have one shared version matching the tag and a matching release heading. The base comparison rejects a decreasing version for unchanged package names at the same manifest paths; a renamed package starts its own version history, and a version prepared in an earlier commit can be released without another bump.
 
-On pull requests the workflow reads the trailer from the PR head while validating the checked-out merge candidate. On pushes it reads the actual branch tip. Existing tags must point to the release commit, so rerunning that commit remains supported. The `cargo:release` task packages the candidate on release changes. Ordinary commits do not publish. After merge, `cargo:publish:pending` checks which workspace packages still need that version; the workflow exchanges a GitHub OIDC token for a short-lived crates.io token only when uploads remain. `cargo:release:publish` publishes the remaining packages, creates and pushes the annotated `vVERSION` tag, and creates or updates the matching GitHub Release through `cargo:releases:github:release`. The workflow uses the GitHub environment `crates-io` and workflow file `publish.yml` by default.
+On pull requests the workflow reads the trailer from the PR head while validating the checked-out merge candidate. On pushes it reads the actual branch tip. Existing tags must point to the release commit, so rerunning that commit remains supported. The `cargo:release` task packages the candidate on release changes. Ordinary commits do not publish. After merge, `cargo:publish:pending` checks which workspace packages still need that version; the workflow exchanges a GitHub OIDC token for a short-lived crates.io token only when uploads remain. `cargo:release:publish` publishes the remaining packages, creates and pushes the annotated release tag, and creates or updates the matching GitHub Release through `cargo:releases:github:release`. The workflow uses the GitHub environment `crates-io` and workflow file `publish.yml` by default.
 
 Plan repository protections before applying them. Store the desired reviewers in the project's Cargo metadata so the setup task can apply them:
 
@@ -127,6 +127,10 @@ Prepare a release with `cargo bake cargo:version:patch` (or `minor`, `major`, or
 
 See [releases.md](releases.md) for the full release history.
 
+### v0.5.3
+
+- Support configurable release tag prefixes, including matching release notes, trailers, GitHub Releases, and tag protections. Existing projects continue to use `v` by default.
+
 ### v0.5.2
 
 - Migrate to the source-backed `core-markdown` document AST, preserving supported Markdown behavior and source bytes.
@@ -135,12 +139,6 @@ See [releases.md](releases.md) for the full release history.
 
 - Use `core-markdown` in place of `socketry-markdown`.
 - Require `bake-license` and `bake-releases` versions that also use `core-markdown`.
-
-### v0.5.0
-
-- Require an explicit `Release: vVERSION` Git trailer to request publication; version changes alone no longer trigger a release. Regenerate the publishing workflow to validate PR-head trailers against the merged candidate, and preserve the trailer when squash merging.
-- Allow renamed packages to begin their own version history.
-- Install the Bake launcher from the `bake` crate in generated publishing workflows.
 
 <!-- bake-readme:releases:end -->
 

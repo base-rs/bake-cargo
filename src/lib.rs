@@ -11,6 +11,9 @@ mod cargo_support;
 mod crates_io;
 mod github;
 mod release;
+mod release_tag;
+
+pub use release_tag::release_tag;
 #[path = "version.rs"]
 mod version_support;
 pub mod workflow;
@@ -194,6 +197,7 @@ pub mod setup {
                 &reviewer_set,
                 wait_timer,
                 &environment,
+                &crate::release_tag::tag_prefix(context)?,
             ))
         }
 
@@ -866,6 +870,50 @@ mod task_tests {
                 )
             };
             assert!(result.is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_release_prefix_without_changing_github_settings() {
+        let mut environment = Environment::new();
+        let project = project();
+        project.cargo_proxy(&mut environment, None);
+        let manifest = std::fs::read_to_string(project.root().join("Cargo.toml")).unwrap();
+        project.write("Cargo.toml", &format!("{manifest}\ntag-prefix = 42\n"));
+        install_gh(
+            &project,
+            &mut environment,
+            "#!/bin/sh\ncase \"$3 $4\" in\n  'GET repos/socketry/fixture/environments?per_page=100') printf '%s' '{\"environments\":[]}' ;;\n  *) echo unexpected-request >&2; exit 1 ;;\nesac\n",
+        );
+        let mut context = project.context();
+        for result in [
+            setup::github::plan(
+                &mut context,
+                "socketry/fixture".to_owned(),
+                "main".to_owned(),
+                1,
+                Vec::new(),
+                vec!["User:123".to_owned()],
+                None,
+                "crates-io".to_owned(),
+            ),
+            setup::github::apply(
+                &mut context,
+                "socketry/fixture".to_owned(),
+                "main".to_owned(),
+                1,
+                Vec::new(),
+                vec!["User:123".to_owned()],
+                None,
+                "crates-io".to_owned(),
+            ),
+        ] {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("tag-prefix must be a string")
+            );
         }
     }
 

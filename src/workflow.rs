@@ -23,9 +23,10 @@ pub fn detect_release(context: &mut Context, base: String, sha: String) -> Resul
     };
     let current = workspace_version(context)?;
     let version = current.to_string();
-    if tag != format!("v{version}") {
+    let expected_tag = crate::release_tag(context, &version)?;
+    if tag != expected_tag {
         return Err(Error::new(format!(
-            "Release trailer must be 'Release: v{version}' to match the workspace version; found {tag:?}"
+            "Release trailer must be 'Release: {expected_tag}' to match the workspace version; found {tag:?}"
         )));
     }
     if let Some(previous) = previous_versions(context, &base)? {
@@ -40,10 +41,10 @@ pub fn detect_release(context: &mut Context, base: String, sha: String) -> Resul
     if !crate::release::contains_release_heading(
         &std::fs::read_to_string(context.root().join("releases.md"))
             .map_err(|error| Error::new(format!("could not read releases.md: {error}")))?,
-        &version,
+        &tag,
     ) {
         return Err(Error::new(format!(
-            "releases.md must contain a '## v{version}' heading"
+            "releases.md must contain a '## {tag}' heading"
         )));
     }
 
@@ -124,6 +125,7 @@ pub fn publish_release(context: &mut Context, version: String, sha: String) -> R
         return Err(Error::new("release commit must be a nonempty Git revision"));
     }
 
+    let tag = crate::release_tag(context, &version)?;
     let (pending, published) = publication_state(context, &version)?;
     let mut published_packages = Vec::new();
     if !pending.is_empty() {
@@ -139,7 +141,6 @@ pub fn publish_release(context: &mut Context, version: String, sha: String) -> R
         published_packages.extend(pending.iter().map(|package| package.name.as_str()));
     }
 
-    let tag = format!("v{version}");
     create_release_tag(context, &tag, &sha)?;
     let url = crate::releases::github::release(
         context,
@@ -849,6 +850,105 @@ mod tests {
     }
 
     #[test]
+    fn invalid_prefix_prevents_release_preparation_detection_and_publication() {
+        let mut environment = Environment::new();
+        let project = release_project("1.2.3");
+        prepare_workspace(&project, &mut environment);
+        let manifest = fs::read_to_string(project.root().join("Cargo.toml")).unwrap();
+        project.write(
+            "Cargo.toml",
+            &format!("{manifest}\n[workspace.metadata.bake.release]\ntag-prefix = 42\n"),
+        );
+        initialize_git(&project, false);
+        let sha = commit(&project);
+        let expected = "tag-prefix must be a string";
+        assert!(
+            crate::release::prepare(&context(&project), "1.2.3")
+                .unwrap_err()
+                .to_string()
+                .contains(expected)
+        );
+        assert!(
+            detect_release(&mut context(&project), "".to_owned(), sha.clone())
+                .unwrap_err()
+                .to_string()
+                .contains(expected)
+        );
+        assert!(
+            publish_release(&mut context(&project), "1.2.3".to_owned(), sha)
+                .unwrap_err()
+                .to_string()
+                .contains(expected)
+        );
+        assert!(!project.cargo_arguments().contains("package --locked"));
+        assert!(!project.cargo_arguments().contains("publish --locked"));
+
+        project.single_package("fixture", "1.2.3");
+        let cargo = project.executable(
+            "cargo-unavailable",
+            "#!/bin/sh\necho metadata denied >&2; exit 1\n",
+        );
+        environment.set("CARGO", cargo.as_os_str());
+        assert!(
+            publish_release(
+                &mut context(&project),
+                "1.2.3".to_owned(),
+                "HEAD".to_owned()
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("metadata denied")
+        );
+    }
+
+    #[test]
+    fn releases_a_renamed_package_without_replacing_historical_tags_or_notes() {
+        let mut environment = Environment::new();
+        let project = release_project("1.2.3");
+        prepare_workspace(&project, &mut environment);
+        let base = initialize_git(&project, true);
+        git_ok(&project, &["tag", "v0.1.0"]);
+
+        project.single_package("renamed-fixture", "0.1.0");
+        let manifest = fs::read_to_string(project.root().join("Cargo.toml")).unwrap();
+        project.write(
+            "Cargo.toml",
+            &format!("{manifest}\n[workspace.metadata.bake.release]\ntag-prefix = 'base-v'\n"),
+        );
+        project.write(
+            "releases.md",
+            "# Releases\n\n## base-v0.1.0\n\nRenamed package.\n\n## v0.1.0\n\nHistorical package.\n",
+        );
+        let sha = commit_message(&project, "Rename the package.\n\nRelease: base-v0.1.0");
+
+        assert_eq!(
+            crate::release::prepare(&context(&project), "0.1.0").unwrap()["tag"],
+            "base-v0.1.0"
+        );
+        assert_eq!(
+            detect_release(&mut context(&project), base.clone(), sha.clone()).unwrap(),
+            json!({"release": true, "version": "0.1.0"})
+        );
+
+        install_gh(&project, &mut environment);
+        let (api, server) = crate::crates_io::tests::mock_server(vec![(404, "crate not found")]);
+        set_crates_io_api(&mut environment, &api);
+        let result =
+            publish_release(&mut context(&project), "0.1.0".to_owned(), sha.clone()).unwrap();
+
+        assert_eq!(result["tag"], "base-v0.1.0");
+        assert_eq!(
+            git_ok(&project, &["rev-parse", "refs/tags/base-v0.1.0^{}"]),
+            sha
+        );
+        assert_eq!(git_ok(&project, &["rev-parse", "refs/tags/v0.1.0"]), base);
+        let notes = fs::read_to_string(project.root().join("gh-release-notes")).unwrap();
+        assert!(notes.contains("Renamed package."));
+        assert!(!notes.contains("Historical package."));
+        server.join().unwrap();
+    }
+
+    #[test]
     fn validates_the_merge_candidate_using_the_pull_request_head_trailer() {
         let mut environment = Environment::new();
         let project = release_project("1.2.3");
@@ -1364,6 +1464,7 @@ mod tests {
 
     #[test]
     fn reports_a_failed_tag_push() {
+        let _environment = Environment::new();
         let project = release_project("1.2.3");
         let sha = initialize_git(&project, false);
 

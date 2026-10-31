@@ -124,6 +124,7 @@ Prepare a release with `cargo bake cargo:version:patch` (or `minor`, `major`, or
 ## Releases
 
 <!-- bake-readme:releases:start -->
+
 See [releases.md](releases.md) for the full release history.
 
 ### v0.5.4
@@ -138,6 +139,7 @@ See [releases.md](releases.md) for the full release history.
 ### v0.5.2
 
 - Migrate to the source-backed `core-markdown` document AST, preserving supported Markdown behavior and source bytes.
+
 <!-- bake-readme:releases:end -->
 
 ## See Also

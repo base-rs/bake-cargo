@@ -1,6 +1,6 @@
 # Releases
 
-## Unreleased
+## v0.6.0
 
 - Require no pull request approvals by default in `cargo:setup:github`, so maintainers merge their own pull requests once checks pass. Pass `--approvals N` to require independent review.
 - Restrict a publishing environment that deploys from all branches to the protected release branch, keeping existing branch policies.

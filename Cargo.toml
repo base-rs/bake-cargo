@@ -1,6 +1,6 @@
 [package]
 name = "bake-cargo"
-version = "0.5.4"
+version = "0.6.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/base-rs/bake-cargo"

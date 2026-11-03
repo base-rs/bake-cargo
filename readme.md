@@ -127,6 +127,12 @@ Prepare a release with `cargo bake cargo:version:patch` (or `minor`, `major`, or
 
 See [releases.md](releases.md) for the full release history.
 
+### v0.6.0
+
+- Require no pull request approvals by default in `cargo:setup:github`, so maintainers merge their own pull requests once checks pass. Pass `--approvals N` to require independent review.
+- Restrict a publishing environment that deploys from all branches to the protected release branch, keeping existing branch policies.
+- Require approval before running workflows for first-time contributors' fork pull requests, keeping a stricter existing policy.
+
 ### v0.5.4
 
 - Depend on `base-markdown` under the `base-rs` organization, replacing `core-markdown`.
@@ -135,10 +141,6 @@ See [releases.md](releases.md) for the full release history.
 ### v0.5.3
 
 - Support configurable release tag prefixes, including matching release notes, trailers, GitHub Releases, and tag protections. Existing projects continue to use `v` by default.
-
-### v0.5.2
-
-- Migrate to the source-backed `core-markdown` document AST, preserving supported Markdown behavior and source bytes.
 
 <!-- bake-readme:releases:end -->
 

@@ -139,7 +139,7 @@ fn executable_runs_release_tasks_in_a_temporary_project() {
             let executable = bin.join("gh");
             fs::write(
                 &executable,
-                "#!/bin/sh\nif [ \"$1 $2\" = 'release view' ]; then\n  case \"$3\" in\n    v1.2.4) printf '%s' '{\"tagName\":\"v1.2.4\",\"name\":\"v1.2.4\",\"body\":\"Improvement.\",\"isDraft\":false,\"url\":\"https://github.com/socketry/fixture/releases/tag/v1.2.4\"}'; exit 0 ;;\n    v1.2.5) printf '%s' '{\"tagName\":\"v1.2.5\",\"name\":\"Old title\",\"body\":\"Old notes.\",\"isDraft\":false,\"url\":\"https://github.com/socketry/fixture/releases/tag/v1.2.5\"}'; exit 0 ;;\n  esac\n  echo 'release not found' >&2; exit 1\nfi\nif [ \"$1 $2\" = 'release create' ] || [ \"$1 $2\" = 'release edit' ]; then printf '%s\\n' \"$@\" >gh-arguments.txt; cat >gh-notes.md; echo \"https://github.com/socketry/fixture/releases/tag/$3\"; exit 0; fi\ncase \"$3 $4\" in\n  'GET users/alice') printf '%s' '{\"id\":42}' ;;\n  'GET repos/socketry/fixture/environments?per_page=100') printf '%s' '{\"environments\":[]}' ;;\n  'GET repos/socketry/fixture/rulesets?per_page=100') printf '%s' '[]' ;;\n  'POST repos/socketry/fixture/rulesets') cat >/dev/null; printf '%s' '{\"id\":7}' ;;\n  'PUT repos/socketry/fixture/environments/crates-io') cat >/dev/null; printf '%s' '{\"name\":\"crates-io\"}' ;;\n  *) echo unexpected-request >&2; exit 1 ;;\nesac\n",
+                "#!/bin/sh\nif [ \"$1 $2\" = 'release view' ]; then\n  case \"$3\" in\n    v1.2.4) printf '%s' '{\"tagName\":\"v1.2.4\",\"name\":\"v1.2.4\",\"body\":\"Improvement.\",\"isDraft\":false,\"url\":\"https://github.com/socketry/fixture/releases/tag/v1.2.4\"}'; exit 0 ;;\n    v1.2.5) printf '%s' '{\"tagName\":\"v1.2.5\",\"name\":\"Old title\",\"body\":\"Old notes.\",\"isDraft\":false,\"url\":\"https://github.com/socketry/fixture/releases/tag/v1.2.5\"}'; exit 0 ;;\n  esac\n  echo 'release not found' >&2; exit 1\nfi\nif [ \"$1 $2\" = 'release create' ] || [ \"$1 $2\" = 'release edit' ]; then printf '%s\\n' \"$@\" >gh-arguments.txt; cat >gh-notes.md; echo \"https://github.com/socketry/fixture/releases/tag/$3\"; exit 0; fi\ncase \"$3 $4\" in\n  'GET users/alice') printf '%s' '{\"id\":42}' ;;\n  'GET repos/socketry/fixture/environments?per_page=100') printf '%s' '{\"environments\":[]}' ;;\n  'GET repos/socketry/fixture/rulesets?per_page=100') printf '%s' '[]' ;;\n  'POST repos/socketry/fixture/rulesets') cat >/dev/null; printf '%s' '{\"id\":7}' ;;\n  'PUT repos/socketry/fixture/environments/crates-io') cat >/dev/null; printf '%s' '{\"name\":\"crates-io\"}' ;;\n  'GET repos/socketry/fixture/environments/crates-io/deployment-branch-policies?per_page=100') printf '%s' '{\"branch_policies\":[]}' ;;\n  'POST repos/socketry/fixture/environments/crates-io/deployment-branch-policies') cat >/dev/null; printf '%s' '{\"name\":\"main\",\"type\":\"branch\"}' ;;\n  'GET repos/socketry/fixture/actions/permissions/fork-pr-contributor-approval') printf '%s' '{\"approval_policy\":\"first_time_contributors\"}' ;;\n  'PUT repos/socketry/fixture/actions/permissions/fork-pr-contributor-approval') cat >/dev/null ;;\n  *) echo unexpected-request >&2; exit 1 ;;\nesac\n",
             )
             .unwrap();
             fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
@@ -201,9 +201,13 @@ fn executable_runs_release_tasks_in_a_temporary_project() {
         project.run(&["cargo:setup:workflow"]),
         "cargo:setup:workflow",
     );
-    assert_success(
-        project.run_with_fake_gh(&["cargo:setup:github:plan"]),
-        "cargo:setup:github:plan",
+    let plan = project.run_with_fake_gh(&["cargo:setup:github:plan"]);
+    let plan_output = String::from_utf8_lossy(&plan.stdout).into_owned();
+    assert_success(plan, "cargo:setup:github:plan");
+    // Maintainers merge their own pull requests once checks pass by default.
+    assert!(
+        plan_output.contains("\"required_approving_review_count\": 0"),
+        "{plan_output}"
     );
     assert_success(
         project.run(&["cargo:trusted-publishing:plan", "fixture"]),

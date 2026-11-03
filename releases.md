@@ -1,5 +1,11 @@
 # Releases
 
+## Unreleased
+
+- Require no pull request approvals by default in `cargo:setup:github`, so maintainers merge their own pull requests once checks pass. Pass `--approvals N` to require independent review.
+- Restrict a publishing environment that deploys from all branches to the protected release branch, keeping existing branch policies.
+- Require approval before running workflows for first-time contributors' fork pull requests, keeping a stricter existing policy.
+
 ## v0.5.4
 
 - Depend on `base-markdown` under the `base-rs` organization, replacing `core-markdown`.

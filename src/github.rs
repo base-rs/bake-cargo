@@ -253,6 +253,7 @@ pub(crate) fn setup_plan(
 ) -> Value {
     let mut environment_settings = environment_payload(&reviewers.resolved, wait_timer, None);
     environment_settings["name"] = json!(environment);
+    environment_settings["deployment_branches"] = json!([branch]);
 
     json!({
         "repository": repository.full_name(),
@@ -260,7 +261,8 @@ pub(crate) fn setup_plan(
         "tag_ruleset": tag_ruleset(tag_prefix),
         "reviewers": {"configured": reviewers.configured, "resolved": reviewers.resolved},
         "environment": environment_settings,
-        "preservation": "Existing environment settings are preserved unless overridden above.",
+        "fork_pr_contributor_approval": {"approval_policy": fork_approval_policy(None)},
+        "preservation": "Existing environment settings are preserved unless overridden above. An environment that deploys from all branches is restricted to the deployment branches above; an existing branch policy is kept. An existing all_external_contributors fork approval policy is preserved.",
         "apply": "cargo:setup:github:apply",
     })
 }
@@ -287,8 +289,10 @@ fn branch_ruleset(branch: &str, approvals: u32, checks: &[String]) -> JsonValue 
     }));
     rules.push(json!({"type": "non_fast_forward"}));
 
-    // GitHub's repository role ID 5 is administrators. Restrict their bypass
-    // to pull requests so branch rules continue to block direct pushes.
+    // GitHub's repository role ID 5 is administrators. Their bypass is an
+    // emergency exception: with no required approvals, maintainers merge
+    // their own pull requests once checks pass. Restrict the bypass to pull
+    // requests so branch rules continue to block direct pushes.
     json!({
         "name": "Socketry Cargo checks",
         "target": "branch",
@@ -367,12 +371,78 @@ fn environment_payload(
         }
     }
 
-    if let Some(branch_policy) =
-        existing.and_then(|environment| environment.get("deployment_branch_policy"))
-    {
-        payload["deployment_branch_policy"] = branch_policy.clone();
-    }
+    // Keep a deliberate branch policy. Otherwise deploy only from the
+    // configured branch, which the managed ruleset protects. A named branch
+    // policy is used because GitHub's "protected branches" environment policy
+    // does not recognize branches protected only by rulesets.
+    payload["deployment_branch_policy"] = existing_branch_policy(existing)
+        .cloned()
+        .unwrap_or_else(|| json!({"protected_branches": false, "custom_branch_policies": true}));
     payload
+}
+
+/// GitHub reports `null` when an environment can deploy from all branches.
+fn existing_branch_policy(existing: Option<&JsonValue>) -> Option<&JsonValue> {
+    existing
+        .and_then(|environment| environment.get("deployment_branch_policy"))
+        .filter(|branch_policy| !branch_policy.is_null())
+}
+
+fn ensure_deployment_branch(
+    context: &Context,
+    repository: &Repository,
+    environment: &str,
+    branch: &str,
+) -> Result<JsonValue> {
+    let path = format!(
+        "repos/{}/environments/{environment}/deployment-branch-policies",
+        repository.full_name()
+    );
+    let existing = github_api(context, "GET", &format!("{path}?per_page=100"), None)?;
+    let policies = existing
+        .get("branch_policies")
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| {
+            Error::new("GitHub returned an invalid deployment branch policies response")
+        })?;
+    if let Some(policy) = policies.iter().find(|policy| {
+        policy.get("name").and_then(JsonValue::as_str) == Some(branch)
+            && policy.get("type").and_then(JsonValue::as_str) != Some("tag")
+    }) {
+        return Ok(policy.clone());
+    }
+    github_api(
+        context,
+        "POST",
+        &path,
+        Some(&json!({"name": branch, "type": "branch"})),
+    )
+}
+
+/// Require maintainer approval before running workflows for first-time
+/// contributors' fork pull requests, preserving the stricter policy that
+/// requires approval for all external contributors.
+fn fork_approval_policy(existing: Option<&str>) -> &'static str {
+    if existing == Some(ALL_EXTERNAL_CONTRIBUTORS) {
+        ALL_EXTERNAL_CONTRIBUTORS
+    } else {
+        FIRST_TIME_CONTRIBUTORS
+    }
+}
+
+const FIRST_TIME_CONTRIBUTORS: &str = "first_time_contributors";
+const ALL_EXTERNAL_CONTRIBUTORS: &str = "all_external_contributors";
+
+fn apply_fork_approval(context: &Context, repository: &Repository) -> Result<JsonValue> {
+    let path = format!(
+        "repos/{}/actions/permissions/fork-pr-contributor-approval",
+        repository.full_name()
+    );
+    let existing = github_api(context, "GET", &path, None)?;
+    let policy = fork_approval_policy(existing.get("approval_policy").and_then(JsonValue::as_str));
+    let body = json!({"approval_policy": policy});
+    github_api(context, "PUT", &path, Some(&body))?;
+    Ok(body)
 }
 
 fn existing_environment(
@@ -435,12 +505,20 @@ pub(crate) fn apply_setup(
     );
     let environment_result =
         github_api(context, "PUT", &environment_path, Some(&environment_body))?;
+    let deployment_branch = if existing_branch_policy(existing_environment.as_ref()).is_none() {
+        ensure_deployment_branch(context, repository, environment, branch)?
+    } else {
+        JsonValue::Null
+    };
+    let fork_approval_result = apply_fork_approval(context, repository)?;
 
     Ok(json!({
         "repository": repository.full_name(),
         "branch_ruleset": branch_result,
         "tag_ruleset": tag_result,
         "environment": environment_result,
+        "deployment_branch": deployment_branch,
+        "fork_pr_contributor_approval": fork_approval_result,
     }))
 }
 
@@ -1169,6 +1247,15 @@ mod tests {
             plan["branch_ruleset"]["rules"][0]["parameters"]["required_approving_review_count"],
             2
         );
+        assert_eq!(
+            plan["environment"]["deployment_branch_policy"]["custom_branch_policies"],
+            true
+        );
+        assert_eq!(plan["environment"]["deployment_branches"], json!(["main"]));
+        assert_eq!(
+            plan["fork_pr_contributor_approval"]["approval_policy"],
+            "first_time_contributors"
+        );
     }
 
     #[test]
@@ -1187,7 +1274,7 @@ mod tests {
         with_fake_gh(
             &project,
             &mut environment,
-            "#!/bin/sh\ncase \"$3 $4\" in\n  'GET repos/socketry/example/environments?per_page=100') printf '%s' '{\"environments\":[]}' ;;\n  'GET repos/socketry/example/rulesets?per_page=100') printf '%s' '[]' ;;\n  'POST repos/socketry/example/rulesets') cat >/dev/null; printf '%s' '{\"created\":true}' ;;\n  'PUT repos/socketry/example/environments/crates-io') cat > requested-environment.json; printf '%s' '{\"name\":\"crates-io\"}' ;;\n  *) echo unexpected-request >&2; exit 1 ;;\nesac\n",
+            "#!/bin/sh\ncase \"$3 $4\" in\n  'GET repos/socketry/example/environments?per_page=100') printf '%s' '{\"environments\":[]}' ;;\n  'GET repos/socketry/example/rulesets?per_page=100') printf '%s' '[]' ;;\n  'POST repos/socketry/example/rulesets') cat >/dev/null; printf '%s' '{\"created\":true}' ;;\n  'PUT repos/socketry/example/environments/crates-io') cat > requested-environment.json; printf '%s' '{\"name\":\"crates-io\"}' ;;\n  'GET repos/socketry/example/environments/crates-io/deployment-branch-policies?per_page=100') printf '%s' '{\"branch_policies\":[]}' ;;\n  'POST repos/socketry/example/environments/crates-io/deployment-branch-policies') cat > requested-deployment-branch.json; printf '%s' '{\"name\":\"main\",\"type\":\"branch\"}' ;;\n  'GET repos/socketry/example/actions/permissions/fork-pr-contributor-approval') printf '%s' '{\"approval_policy\":\"first_time_contributors\"}' ;;\n  'PUT repos/socketry/example/actions/permissions/fork-pr-contributor-approval') cat > requested-fork-approval.json ;;\n  *) echo unexpected-request >&2; exit 1 ;;\nesac\n",
         );
         let repository = Repository {
             owner: "socketry".to_owned(),
@@ -1211,6 +1298,31 @@ mod tests {
         )
         .unwrap();
         assert_eq!(environment_body["reviewers"][0]["id"], 123);
+        assert_eq!(
+            environment_body["deployment_branch_policy"],
+            json!({"protected_branches": false, "custom_branch_policies": true})
+        );
+        let deployment_branch_body: JsonValue = serde_json::from_slice(
+            &std::fs::read(project.root().join("requested-deployment-branch.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            deployment_branch_body,
+            json!({"name": "main", "type": "branch"})
+        );
+        assert_eq!(result["deployment_branch"]["name"], "main");
+        assert_eq!(
+            result["fork_pr_contributor_approval"]["approval_policy"],
+            "first_time_contributors"
+        );
+        let fork_approval_body: JsonValue = serde_json::from_slice(
+            &std::fs::read(project.root().join("requested-fork-approval.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            fork_approval_body,
+            json!({"approval_policy": "first_time_contributors"})
+        );
     }
 
     #[test]
@@ -1236,6 +1348,19 @@ case "$3 $4" in
     cat >/dev/null
     if [ "$BAKE_TEST_SETUP_FAILURE" = environment-update ]; then echo 'injected failure' >&2; exit 1; fi
     printf '%s' '{}' ;;
+  'GET repos/socketry/example/environments/crates-io/deployment-branch-policies?per_page=100')
+    if [ "$BAKE_TEST_SETUP_FAILURE" = deployment-branches-read ]; then echo 'injected failure' >&2; exit 1; fi
+    printf '%s' '{"branch_policies":[]}' ;;
+  'POST repos/socketry/example/environments/crates-io/deployment-branch-policies')
+    cat >/dev/null
+    if [ "$BAKE_TEST_SETUP_FAILURE" = deployment-branch-create ]; then echo 'injected failure' >&2; exit 1; fi
+    printf '%s' '{}' ;;
+  'GET repos/socketry/example/actions/permissions/fork-pr-contributor-approval')
+    if [ "$BAKE_TEST_SETUP_FAILURE" = fork-approval-read ]; then echo 'injected failure' >&2; exit 1; fi
+    printf '%s' '{"approval_policy":"first_time_contributors"}' ;;
+  'PUT repos/socketry/example/actions/permissions/fork-pr-contributor-approval')
+    cat >/dev/null
+    if [ "$BAKE_TEST_SETUP_FAILURE" = fork-approval-update ]; then echo 'injected failure' >&2; exit 1; fi ;;
   *) echo unexpected-request >&2; exit 1 ;;
 esac
 "#;
@@ -1246,7 +1371,16 @@ esac
             name: "example".to_owned(),
         };
 
-        for failure in ["environments", "1", "2", "environment-update"] {
+        for failure in [
+            "environments",
+            "1",
+            "2",
+            "environment-update",
+            "deployment-branches-read",
+            "deployment-branch-create",
+            "fork-approval-read",
+            "fork-approval-update",
+        ] {
             let _ = std::fs::remove_file(&gets_file);
             environment.set("BAKE_TEST_SETUP_FAILURE", failure);
             assert!(
@@ -1305,7 +1439,7 @@ esac
         with_fake_gh(
             &project,
             &mut environment,
-            "#!/bin/sh\ncase \"$3 $4\" in\n  'GET repos/socketry/example/environments?per_page=100') printf '%s' '{\"environments\":[{\"name\":\"crates-io\"}]}' ;;\n  'GET repos/socketry/example/environments/crates-io') printf '%s' '{\"protection_rules\":[{\"type\":\"wait_timer\",\"wait_timer\":5},{\"type\":\"required_reviewers\",\"prevent_self_review\":true,\"reviewers\":[{\"type\":\"User\",\"reviewer\":{\"id\":77}}]}],\"deployment_branch_policy\":{\"protected_branches\":true}}' ;;\n  'GET repos/socketry/example/rulesets?per_page=100') printf '%s' '[{\"name\":\"Socketry Cargo checks\",\"id\":42},{\"name\":\"Socketry Cargo release tags\",\"id\":43}]' ;;\n  'PUT repos/socketry/example/rulesets/42'|'PUT repos/socketry/example/rulesets/43') cat >/dev/null; printf '%s' '{\"updated\":true}' ;;\n  'PUT repos/socketry/example/environments/crates-io') cat > requested-environment.json; printf '%s' '{}' ;;\n  *) echo unexpected-request >&2; exit 1 ;;\nesac\n",
+            "#!/bin/sh\ncase \"$3 $4\" in\n  'GET repos/socketry/example/environments?per_page=100') printf '%s' '{\"environments\":[{\"name\":\"crates-io\"}]}' ;;\n  'GET repos/socketry/example/environments/crates-io') printf '%s' '{\"protection_rules\":[{\"type\":\"wait_timer\",\"wait_timer\":5},{\"type\":\"required_reviewers\",\"prevent_self_review\":true,\"reviewers\":[{\"type\":\"User\",\"reviewer\":{\"id\":77}}]}],\"deployment_branch_policy\":{\"protected_branches\":true}}' ;;\n  'GET repos/socketry/example/rulesets?per_page=100') printf '%s' '[{\"name\":\"Socketry Cargo checks\",\"id\":42},{\"name\":\"Socketry Cargo release tags\",\"id\":43}]' ;;\n  'PUT repos/socketry/example/rulesets/42'|'PUT repos/socketry/example/rulesets/43') cat >/dev/null; printf '%s' '{\"updated\":true}' ;;\n  'PUT repos/socketry/example/environments/crates-io') cat > requested-environment.json; printf '%s' '{}' ;;\n  'GET repos/socketry/example/actions/permissions/fork-pr-contributor-approval') printf '%s' '{\"approval_policy\":\"all_external_contributors\"}' ;;\n  'PUT repos/socketry/example/actions/permissions/fork-pr-contributor-approval') cat > requested-fork-approval.json ;;\n  *) echo unexpected-request >&2; exit 1 ;;\nesac\n",
         );
         let repository = Repository {
             owner: "socketry".to_owned(),
@@ -1332,6 +1466,99 @@ esac
         assert_eq!(
             environment_body["deployment_branch_policy"]["protected_branches"],
             true
+        );
+        let fork_approval_body: JsonValue = serde_json::from_slice(
+            &std::fs::read(project.root().join("requested-fork-approval.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            fork_approval_body,
+            json!({"approval_policy": "all_external_contributors"})
+        );
+    }
+
+    #[test]
+    fn restricts_unrestricted_environments_to_named_branches() {
+        let protected = json!({"protected_branches": false, "custom_branch_policies": true});
+        assert_eq!(
+            environment_payload(&[], None, None)["deployment_branch_policy"],
+            protected
+        );
+        let unrestricted = json!({"deployment_branch_policy": null});
+        assert_eq!(
+            environment_payload(&[], None, Some(&unrestricted))["deployment_branch_policy"],
+            protected
+        );
+        let custom = json!({
+            "deployment_branch_policy": {"protected_branches": false, "custom_branch_policies": true}
+        });
+        assert_eq!(
+            environment_payload(&[], None, Some(&custom))["deployment_branch_policy"],
+            custom["deployment_branch_policy"]
+        );
+    }
+
+    #[test]
+    fn adds_the_deployment_branch_only_when_it_is_missing() {
+        let mut environment = Environment::new();
+        let repository = Repository {
+            owner: "socketry".to_owned(),
+            name: "example".to_owned(),
+        };
+        let path = "repos/socketry/example/environments/crates-io/deployment-branch-policies";
+
+        let existing = Project::new();
+        with_fake_gh(
+            &existing,
+            &mut environment,
+            &format!(
+                "#!/bin/sh\ncase \"$3 $4\" in\n  'GET {path}?per_page=100') printf '%s' '{{\"branch_policies\":[{{\"name\":\"main\",\"type\":\"branch\"}}]}}' ;;\n  *) echo unexpected-request >&2; exit 1 ;;\nesac\n"
+            ),
+        );
+        assert_eq!(
+            ensure_deployment_branch(&existing.context(), &repository, "crates-io", "main")
+                .unwrap()["type"],
+            "branch"
+        );
+
+        let tag_only = Project::new();
+        with_fake_gh(
+            &tag_only,
+            &mut environment,
+            &format!(
+                "#!/bin/sh\ncase \"$3 $4\" in\n  'GET {path}?per_page=100') printf '%s' '{{\"branch_policies\":[{{\"name\":\"main\",\"type\":\"tag\"}},{{\"name\":\"release\",\"type\":\"branch\"}}]}}' ;;\n  'POST {path}') cat >/dev/null; printf '%s' '{{\"created\":true}}' ;;\n  *) echo unexpected-request >&2; exit 1 ;;\nesac\n"
+            ),
+        );
+        assert_eq!(
+            ensure_deployment_branch(&tag_only.context(), &repository, "crates-io", "main")
+                .unwrap()["created"],
+            true
+        );
+
+        let malformed = Project::new();
+        with_fake_gh(
+            &malformed,
+            &mut environment,
+            "#!/bin/sh\nprintf '%s' '{}'\n",
+        );
+        assert!(
+            ensure_deployment_branch(&malformed.context(), &repository, "crates-io", "main")
+                .unwrap_err()
+                .to_string()
+                .contains("invalid deployment branch policies response")
+        );
+    }
+
+    #[test]
+    fn requires_fork_approval_without_loosening_a_stricter_policy() {
+        assert_eq!(fork_approval_policy(None), "first_time_contributors");
+        assert_eq!(
+            fork_approval_policy(Some("first_time_contributors_new_to_github")),
+            "first_time_contributors"
+        );
+        assert_eq!(
+            fork_approval_policy(Some("all_external_contributors")),
+            "all_external_contributors"
         );
     }
 

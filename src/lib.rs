@@ -163,7 +163,7 @@ pub mod setup {
             context: &mut Context,
             #[bake(default = "")] repository: String,
             #[bake(default = "main")] branch: String,
-            #[bake(default = 1)] approvals: u32,
+            #[bake(default = 0)] approvals: u32,
             checks: Vec<String>,
             reviewers: Vec<String>,
             wait_timer: Option<u32>,
@@ -209,7 +209,7 @@ pub mod setup {
             context: &mut Context,
             #[bake(default = "")] repository: String,
             #[bake(default = "main")] branch: String,
-            #[bake(default = 1)] approvals: u32,
+            #[bake(default = 0)] approvals: u32,
             checks: Vec<String>,
             reviewers: Vec<String>,
             wait_timer: Option<u32>,
@@ -925,7 +925,7 @@ mod task_tests {
         install_gh(
             &project,
             &mut environment,
-            "#!/bin/sh\ncase \"$3 $4\" in\n  'GET repos/socketry/fixture/environments?per_page=100') printf '%s' '{\"environments\":[]}' ;;\n  'GET repos/socketry/fixture/rulesets?per_page=100') printf '%s' '[]' ;;\n  'POST repos/socketry/fixture/rulesets') cat >/dev/null; printf '%s' '{}' ;;\n  'PUT repos/socketry/fixture/environments/crates-io') cat >/dev/null; printf '%s' '{}' ;;\n  *) echo unexpected-request >&2; exit 1 ;;\nesac\n",
+            "#!/bin/sh\ncase \"$3 $4\" in\n  'GET repos/socketry/fixture/environments?per_page=100') printf '%s' '{\"environments\":[]}' ;;\n  'GET repos/socketry/fixture/rulesets?per_page=100') printf '%s' '[]' ;;\n  'POST repos/socketry/fixture/rulesets') cat >/dev/null; printf '%s' '{}' ;;\n  'PUT repos/socketry/fixture/environments/crates-io') cat >/dev/null; printf '%s' '{}' ;;\n  'GET repos/socketry/fixture/environments/crates-io/deployment-branch-policies?per_page=100') printf '%s' '{\"branch_policies\":[]}' ;;\n  'POST repos/socketry/fixture/environments/crates-io/deployment-branch-policies') cat >/dev/null; printf '%s' '{\"name\":\"main\",\"type\":\"branch\"}' ;;\n  'GET repos/socketry/fixture/actions/permissions/fork-pr-contributor-approval') printf '%s' '{\"approval_policy\":\"first_time_contributors\"}' ;;\n  'PUT repos/socketry/fixture/actions/permissions/fork-pr-contributor-approval') cat >/dev/null ;;\n  *) echo unexpected-request >&2; exit 1 ;;\nesac\n",
         );
         let mut context = project.context();
         let result = setup::github::apply(

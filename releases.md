@@ -1,6 +1,6 @@
 # Releases
 
-## Unreleased
+## v0.6.1
 
 - Fail `cargo:setup:github:apply` before changing anything when a reviewer team cannot access the repository, printing the command that grants access, and list such teams in `cargo:setup:github:plan`. After saving the environment, read it back and fail when GitHub has silently dropped a requested reviewer.
 

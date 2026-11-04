@@ -135,6 +135,10 @@ Prepare a release with `cargo bake cargo:version:patch` (or `minor`, `major`, or
 
 See [releases.md](releases.md) for the full release history.
 
+### v0.6.1
+
+- Fail `cargo:setup:github:apply` before changing anything when a reviewer team cannot access the repository, printing the command that grants access, and list such teams in `cargo:setup:github:plan`. After saving the environment, read it back and fail when GitHub has silently dropped a requested reviewer.
+
 ### v0.6.0
 
 - Require no pull request approvals by default in `cargo:setup:github`, so maintainers merge their own pull requests once checks pass. Pass `--approvals N` to require independent review.
@@ -145,10 +149,6 @@ See [releases.md](releases.md) for the full release history.
 
 - Depend on `base-markdown` under the `base-rs` organization, replacing `core-markdown`.
 - Require migrated Bake License and Bake Releases dependencies.
-
-### v0.5.3
-
-- Support configurable release tag prefixes, including matching release notes, trailers, GitHub Releases, and tag protections. Existing projects continue to use `v` by default.
 
 <!-- bake-readme:releases:end -->
 

@@ -156,7 +156,7 @@ pub mod setup {
     pub mod github {
         use super::super::*;
 
-        /// Show the desired repository rulesets and publishing environment.
+        /// Show the desired repository rulesets and publishing environment, and any reviewer team that needs repository access first.
         #[bake::task]
         #[allow(clippy::too_many_arguments)]
         pub fn plan(
@@ -189,12 +189,15 @@ pub mod setup {
             }
             let checks = github_helpers::effective_checks(&checks);
             let reviewer_set = github_helpers::resolve_reviewers(context, &repository, &reviewers)?;
+            let teams_without_access =
+                github_helpers::teams_without_access(context, &repository, &reviewer_set)?;
             Ok(github_helpers::setup_plan(
                 &repository,
                 &branch,
                 approvals,
                 &checks,
                 &reviewer_set,
+                &teams_without_access,
                 wait_timer,
                 &environment,
                 &crate::release_tag::tag_prefix(context)?,
@@ -202,7 +205,7 @@ pub mod setup {
         }
 
         /// Apply the managed rulesets and create/update the publishing environment.
-        /// Run `cargo:setup:github:plan` first and review its output.
+        /// Run `cargo:setup:github:plan` first and review its output. Fails before changing anything when a reviewer team cannot access the repository, and after saving when GitHub drops a requested reviewer.
         #[bake::task]
         #[allow(clippy::too_many_arguments)]
         pub fn apply(
@@ -237,7 +240,7 @@ pub mod setup {
                 &branch,
                 approvals,
                 &checks,
-                &reviewer_set.resolved,
+                &reviewer_set,
                 wait_timer,
                 &environment,
             )
@@ -843,6 +846,36 @@ mod task_tests {
             assert!(error.to_string().contains("reviewer lookup denied"));
         }
 
+        let access_failure = project();
+        access_failure.cargo_proxy(&mut environment, None);
+        install_gh(
+            &access_failure,
+            &mut environment,
+            "#!/bin/sh\ncase \"$3 $4\" in\n  'GET orgs/socketry/teams/managers') printf '%s' '{\"id\":5}' ;;\n  *) echo 'gh: Forbidden (HTTP 403)' >&2; exit 1 ;;\nesac\n",
+        );
+        for apply in [false, true] {
+            let task = if apply {
+                setup::github::apply
+            } else {
+                setup::github::plan
+            };
+            let error = task(
+                &mut access_failure.context(),
+                "socketry/fixture".to_owned(),
+                "main".to_owned(),
+                1,
+                Vec::new(),
+                vec!["socketry/managers".to_owned()],
+                None,
+                "crates-io".to_owned(),
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("GET orgs/socketry/teams/managers/repos/socketry/fixture failed: gh: Forbidden (HTTP 403)"),
+                "{error}"
+            );
+        }
+
         let invalid_repository = project();
         invalid_repository.cargo_proxy(&mut environment, None);
         for apply in [false, true] {
@@ -925,7 +958,7 @@ mod task_tests {
         install_gh(
             &project,
             &mut environment,
-            "#!/bin/sh\ncase \"$3 $4\" in\n  'GET repos/socketry/fixture/environments?per_page=100') printf '%s' '{\"environments\":[]}' ;;\n  'GET repos/socketry/fixture/rulesets?per_page=100') printf '%s' '[]' ;;\n  'POST repos/socketry/fixture/rulesets') cat >/dev/null; printf '%s' '{}' ;;\n  'PUT repos/socketry/fixture/environments/crates-io') cat >/dev/null; printf '%s' '{}' ;;\n  'GET repos/socketry/fixture/environments/crates-io/deployment-branch-policies?per_page=100') printf '%s' '{\"branch_policies\":[]}' ;;\n  'POST repos/socketry/fixture/environments/crates-io/deployment-branch-policies') cat >/dev/null; printf '%s' '{\"name\":\"main\",\"type\":\"branch\"}' ;;\n  'GET repos/socketry/fixture/actions/permissions/fork-pr-contributor-approval') printf '%s' '{\"approval_policy\":\"first_time_contributors\"}' ;;\n  'PUT repos/socketry/fixture/actions/permissions/fork-pr-contributor-approval') cat >/dev/null ;;\n  *) echo unexpected-request >&2; exit 1 ;;\nesac\n",
+            "#!/bin/sh\ncase \"$3 $4\" in\n  'GET repos/socketry/fixture/environments?per_page=100') printf '%s' '{\"environments\":[]}' ;;\n  'GET repos/socketry/fixture/rulesets?per_page=100') printf '%s' '[]' ;;\n  'POST repos/socketry/fixture/rulesets') cat >/dev/null; printf '%s' '{}' ;;\n  'PUT repos/socketry/fixture/environments/crates-io') cat >/dev/null; printf '%s' '{}' ;;\n  'GET repos/socketry/fixture/environments/crates-io') printf '%s' '{\"protection_rules\":[{\"type\":\"required_reviewers\",\"reviewers\":[{\"type\":\"User\",\"reviewer\":{\"id\":123}}]}]}' ;;\n  'GET repos/socketry/fixture/environments/crates-io/deployment-branch-policies?per_page=100') printf '%s' '{\"branch_policies\":[]}' ;;\n  'POST repos/socketry/fixture/environments/crates-io/deployment-branch-policies') cat >/dev/null; printf '%s' '{\"name\":\"main\",\"type\":\"branch\"}' ;;\n  'GET repos/socketry/fixture/actions/permissions/fork-pr-contributor-approval') printf '%s' '{\"approval_policy\":\"first_time_contributors\"}' ;;\n  'PUT repos/socketry/fixture/actions/permissions/fork-pr-contributor-approval') cat >/dev/null ;;\n  *) echo unexpected-request >&2; exit 1 ;;\nesac\n",
         );
         let mut context = project.context();
         let result = setup::github::apply(

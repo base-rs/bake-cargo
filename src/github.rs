@@ -240,6 +240,76 @@ pub(crate) fn resolve_reviewers(
     })
 }
 
+impl ReviewerSet {
+    /// The configured reviewer that resolved to a `User:ID` or `Team:ID` value.
+    fn configured_name(&self, resolved: &str) -> Option<&str> {
+        self.resolved
+            .iter()
+            .zip(&self.configured)
+            .find(|(candidate, _)| *candidate == resolved)
+            .map(|(_, configured)| configured.as_str())
+    }
+}
+
+/// The command a maintainer runs to give a team access to the repository.
+fn grant_team_access_command(repository: &Repository, team: &str) -> String {
+    format!(
+        "gh api --method PUT orgs/{team_path}/repos/{} -f permission=maintain",
+        repository.full_name(),
+        team_path = team.replacen('/', "/teams/", 1),
+    )
+}
+
+/// List configured reviewer teams, named as organization/team slugs, that cannot access the repository.
+///
+/// GitHub silently drops environment reviewers who cannot access the repository, so check teams before saving the environment. Teams given as `Team:ID` have no slug to check; the read-back after saving still catches them.
+pub(crate) fn teams_without_access(
+    context: &Context,
+    repository: &Repository,
+    reviewers: &ReviewerSet,
+) -> Result<Vec<String>> {
+    let mut missing = Vec::new();
+    for reviewer in &reviewers.configured {
+        let Some((organization, team)) = reviewer.split_once('/') else {
+            continue;
+        };
+        let path = format!(
+            "orgs/{organization}/teams/{team}/repos/{}",
+            repository.full_name()
+        );
+        match github_api(context, "GET", &path, None) {
+            Ok(_) => {}
+            // GitHub answers 404 when the team cannot access the repository, and `gh api` reports the status on standard error.
+            Err(error) if error.to_string().contains("(HTTP 404)") => {
+                missing.push(reviewer.clone())
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(missing)
+}
+
+fn require_team_access(
+    context: &Context,
+    repository: &Repository,
+    reviewers: &ReviewerSet,
+) -> Result<()> {
+    let missing = teams_without_access(context, repository, reviewers)?;
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let commands = missing
+        .iter()
+        .map(|team| format!("  {}", grant_team_access_command(repository, team)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Err(Error::new(format!(
+        "required reviewer team(s) {} cannot access {}, and GitHub silently drops environment reviewers without repository access, leaving nobody able to approve releases. Nothing was changed. Grant access deliberately, then run cargo:setup:github:apply again:\n{commands}",
+        missing.join(", "),
+        repository.full_name(),
+    )))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn setup_plan(
     repository: &Repository,
@@ -247,6 +317,7 @@ pub(crate) fn setup_plan(
     approvals: u32,
     checks: &[String],
     reviewers: &ReviewerSet,
+    teams_without_access: &[String],
     wait_timer: Option<u32>,
     environment: &str,
     tag_prefix: &str,
@@ -254,12 +325,20 @@ pub(crate) fn setup_plan(
     let mut environment_settings = environment_payload(&reviewers.resolved, wait_timer, None);
     environment_settings["name"] = json!(environment);
     environment_settings["deployment_branches"] = json!([branch]);
+    let missing_access = teams_without_access
+        .iter()
+        .map(|team| json!({"team": team, "grant": grant_team_access_command(repository, team)}))
+        .collect::<Vec<_>>();
 
     json!({
         "repository": repository.full_name(),
         "branch_ruleset": branch_ruleset(branch, approvals, checks),
         "tag_ruleset": tag_ruleset(tag_prefix),
-        "reviewers": {"configured": reviewers.configured, "resolved": reviewers.resolved},
+        "reviewers": {
+            "configured": reviewers.configured,
+            "resolved": reviewers.resolved,
+            "missing_repository_access": missing_access,
+        },
         "environment": environment_settings,
         "fork_pr_contributor_approval": {"approval_policy": fork_approval_policy(None)},
         "preservation": "Existing environment settings are preserved unless overridden above. An environment that deploys from all branches is restricted to the deployment branches above; an existing branch policy is kept. An existing all_external_contributors fork approval policy is preserved.",
@@ -477,7 +556,7 @@ pub(crate) fn apply_setup(
     branch: &str,
     approvals: u32,
     checks: &[String],
-    reviewers: &[String],
+    reviewers: &ReviewerSet,
     wait_timer: Option<u32>,
     environment: &str,
 ) -> Result<Value> {
@@ -490,14 +569,18 @@ pub(crate) fn apply_setup(
             "the workspace has no publishable packages to protect",
         ));
     }
+    require_team_access(context, repository, reviewers)?;
     let existing_environment = existing_environment(context, repository, environment)?;
     let branch_ruleset = branch_ruleset(branch, approvals, checks);
     let tag_ruleset = tag_ruleset(&crate::release_tag::tag_prefix(context)?);
 
     let branch_result = upsert_ruleset(context, repository, &branch_ruleset)?;
     let tag_result = upsert_ruleset(context, repository, &tag_ruleset)?;
-    let environment_body =
-        environment_payload(reviewers, wait_timer, existing_environment.as_ref());
+    let environment_body = environment_payload(
+        &reviewers.resolved,
+        wait_timer,
+        existing_environment.as_ref(),
+    );
     let environment_path = format!(
         "repos/{}/environments/{}",
         repository.full_name(),
@@ -511,6 +594,13 @@ pub(crate) fn apply_setup(
         JsonValue::Null
     };
     let fork_approval_result = apply_fork_approval(context, repository)?;
+    verify_environment_reviewers(
+        context,
+        repository,
+        environment,
+        &environment_body,
+        reviewers,
+    )?;
 
     Ok(json!({
         "repository": repository.full_name(),
@@ -520,6 +610,82 @@ pub(crate) fn apply_setup(
         "deployment_branch": deployment_branch,
         "fork_pr_contributor_approval": fork_approval_result,
     }))
+}
+
+/// Read the saved environment back and require every requested reviewer.
+///
+/// GitHub accepts an environment update that names reviewers without access to the repository, but silently leaves them out, so a successful response does not mean anyone can approve a release.
+fn verify_environment_reviewers(
+    context: &Context,
+    repository: &Repository,
+    environment: &str,
+    requested: &JsonValue,
+    reviewers: &ReviewerSet,
+) -> Result<()> {
+    let Some(requested) = requested.get("reviewers").and_then(JsonValue::as_array) else {
+        return Ok(());
+    };
+    let path = format!(
+        "repos/{}/environments/{environment}",
+        repository.full_name()
+    );
+    let saved = github_api(context, "GET", &path, None)?;
+    let saved_reviewers = saved
+        .get("protection_rules")
+        .and_then(JsonValue::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|rule| rule.get("type").and_then(JsonValue::as_str) == Some("required_reviewers"))
+        .filter_map(|rule| rule.get("reviewers").and_then(JsonValue::as_array))
+        .flatten()
+        .filter_map(|reviewer| {
+            let kind = reviewer.get("type")?.as_str()?;
+            let identifier = reviewer.get("reviewer")?.get("id")?.as_u64()?;
+            Some(format!("{kind}:{identifier}"))
+        })
+        .collect::<Vec<_>>();
+    let missing = requested
+        .iter()
+        .map(|reviewer| {
+            format!(
+                "{}:{}",
+                reviewer["type"].as_str().unwrap_or_default(),
+                reviewer["id"]
+            )
+        })
+        .filter(|reviewer| !saved_reviewers.contains(reviewer))
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    let mut fixes = Vec::new();
+    let mut unnamed = false;
+    let names = missing
+        .iter()
+        .map(|reviewer| match reviewers.configured_name(reviewer) {
+            Some(team) if team.contains('/') => {
+                fixes.push(format!("  {}", grant_team_access_command(repository, team)));
+                format!("{reviewer} ({team})")
+            }
+            _ => {
+                unnamed = true;
+                reviewer.clone()
+            }
+        })
+        .collect::<Vec<_>>();
+    if unnamed {
+        fixes.push(format!(
+            "  Give each missing team access to {}, or add each missing user as a collaborator.",
+            repository.full_name()
+        ));
+    }
+    Err(Error::new(format!(
+        "GitHub saved environment {environment} in {} without required reviewer(s) {}, so nobody may be able to approve releases. GitHub silently drops reviewers who cannot access the repository. Grant access deliberately, then run cargo:setup:github:apply again:\n{}",
+        repository.full_name(),
+        names.join(", "),
+        fixes.join("\n"),
+    )))
 }
 
 fn upsert_ruleset(
@@ -613,6 +779,17 @@ mod tests {
     use super::*;
     use crate::test_support::{Environment, Project, shell_quote};
     use std::process::Command;
+
+    fn explicit_reviewers(reviewers: &[&str]) -> ReviewerSet {
+        let reviewers = reviewers
+            .iter()
+            .map(|reviewer| reviewer.to_string())
+            .collect::<Vec<_>>();
+        ReviewerSet {
+            configured: reviewers.clone(),
+            resolved: reviewers,
+        }
+    }
 
     fn with_fake_gh(project: &Project, environment: &mut Environment, script: &str) {
         project.executable("gh", script);
@@ -1230,6 +1407,7 @@ mod tests {
             2,
             &["test".to_owned()],
             &reviewers,
+            &["socketry/managers".to_owned()],
             Some(10),
             "crates-io",
             "base-v",
@@ -1237,6 +1415,13 @@ mod tests {
 
         assert_eq!(plan["repository"], "socketry/example");
         assert_eq!(plan["reviewers"]["configured"][0], "socketry/managers");
+        assert_eq!(
+            plan["reviewers"]["missing_repository_access"],
+            json!([{
+                "team": "socketry/managers",
+                "grant": "gh api --method PUT orgs/socketry/teams/managers/repos/socketry/example -f permission=maintain",
+            }])
+        );
         assert_eq!(plan["environment"]["name"], "crates-io");
         assert_eq!(plan["environment"]["wait_timer"], 10);
         assert_eq!(
@@ -1274,7 +1459,7 @@ mod tests {
         with_fake_gh(
             &project,
             &mut environment,
-            "#!/bin/sh\ncase \"$3 $4\" in\n  'GET repos/socketry/example/environments?per_page=100') printf '%s' '{\"environments\":[]}' ;;\n  'GET repos/socketry/example/rulesets?per_page=100') printf '%s' '[]' ;;\n  'POST repos/socketry/example/rulesets') cat >/dev/null; printf '%s' '{\"created\":true}' ;;\n  'PUT repos/socketry/example/environments/crates-io') cat > requested-environment.json; printf '%s' '{\"name\":\"crates-io\"}' ;;\n  'GET repos/socketry/example/environments/crates-io/deployment-branch-policies?per_page=100') printf '%s' '{\"branch_policies\":[]}' ;;\n  'POST repos/socketry/example/environments/crates-io/deployment-branch-policies') cat > requested-deployment-branch.json; printf '%s' '{\"name\":\"main\",\"type\":\"branch\"}' ;;\n  'GET repos/socketry/example/actions/permissions/fork-pr-contributor-approval') printf '%s' '{\"approval_policy\":\"first_time_contributors\"}' ;;\n  'PUT repos/socketry/example/actions/permissions/fork-pr-contributor-approval') cat > requested-fork-approval.json ;;\n  *) echo unexpected-request >&2; exit 1 ;;\nesac\n",
+            "#!/bin/sh\ncase \"$3 $4\" in\n  'GET repos/socketry/example/environments?per_page=100') printf '%s' '{\"environments\":[]}' ;;\n  'GET repos/socketry/example/rulesets?per_page=100') printf '%s' '[]' ;;\n  'POST repos/socketry/example/rulesets') cat >/dev/null; printf '%s' '{\"created\":true}' ;;\n  'PUT repos/socketry/example/environments/crates-io') cat > requested-environment.json; printf '%s' '{\"name\":\"crates-io\"}' ;;\n  'GET repos/socketry/example/environments/crates-io') printf '%s' '{\"protection_rules\":[{\"type\":\"required_reviewers\",\"reviewers\":[{\"type\":\"User\",\"reviewer\":{\"id\":123}}]}]}' ;;\n  'GET repos/socketry/example/environments/crates-io/deployment-branch-policies?per_page=100') printf '%s' '{\"branch_policies\":[]}' ;;\n  'POST repos/socketry/example/environments/crates-io/deployment-branch-policies') cat > requested-deployment-branch.json; printf '%s' '{\"name\":\"main\",\"type\":\"branch\"}' ;;\n  'GET repos/socketry/example/actions/permissions/fork-pr-contributor-approval') printf '%s' '{\"approval_policy\":\"first_time_contributors\"}' ;;\n  'PUT repos/socketry/example/actions/permissions/fork-pr-contributor-approval') cat > requested-fork-approval.json ;;\n  *) echo unexpected-request >&2; exit 1 ;;\nesac\n",
         );
         let repository = Repository {
             owner: "socketry".to_owned(),
@@ -1286,7 +1471,7 @@ mod tests {
             "main",
             1,
             &["check".to_owned()],
-            &["User:123".to_owned()],
+            &explicit_reviewers(&["User:123"]),
             None,
             "crates-io",
         )
@@ -1348,6 +1533,9 @@ case "$3 $4" in
     cat >/dev/null
     if [ "$BAKE_TEST_SETUP_FAILURE" = environment-update ]; then echo 'injected failure' >&2; exit 1; fi
     printf '%s' '{}' ;;
+  'GET repos/socketry/example/environments/crates-io')
+    if [ "$BAKE_TEST_SETUP_FAILURE" = environment-read-back ]; then echo 'injected failure' >&2; exit 1; fi
+    printf '%s' '{"protection_rules":[{"type":"required_reviewers","reviewers":[{"type":"User","reviewer":{"id":123}}]}]}' ;;
   'GET repos/socketry/example/environments/crates-io/deployment-branch-policies?per_page=100')
     if [ "$BAKE_TEST_SETUP_FAILURE" = deployment-branches-read ]; then echo 'injected failure' >&2; exit 1; fi
     printf '%s' '{"branch_policies":[]}' ;;
@@ -1380,6 +1568,7 @@ esac
             "deployment-branch-create",
             "fork-approval-read",
             "fork-approval-update",
+            "environment-read-back",
         ] {
             let _ = std::fs::remove_file(&gets_file);
             environment.set("BAKE_TEST_SETUP_FAILURE", failure);
@@ -1390,7 +1579,7 @@ esac
                     "main",
                     1,
                     &["check".to_owned()],
-                    &["User:123".to_owned()],
+                    &explicit_reviewers(&["User:123"]),
                     None,
                     "crates-io",
                 )
@@ -1413,7 +1602,7 @@ esac
                 "main",
                 1,
                 &["check".to_owned()],
-                &["User:123".to_owned()],
+                &explicit_reviewers(&["User:123"]),
                 None,
                 "crates-io",
             )
@@ -1451,7 +1640,7 @@ esac
             "main",
             1,
             &["check".to_owned()],
-            &[],
+            &explicit_reviewers(&[]),
             None,
             "crates-io",
         )
@@ -1582,7 +1771,7 @@ esac
                 "main",
                 1,
                 &["check".to_owned()],
-                &["User:123".to_owned()],
+                &explicit_reviewers(&["User:123"]),
                 None,
                 "crates-io",
             )
@@ -1614,6 +1803,244 @@ esac
         assert_eq!(
             tag_ruleset("v")["conditions"]["ref_name"]["include"][0],
             "refs/tags/v*"
+        );
+    }
+
+    #[test]
+    fn checks_reviewer_team_access_before_changing_anything() {
+        let mut environment = Environment::new();
+        let project = Project::new();
+        project.single_package("fixture", "1.2.3");
+        project.cargo_proxy(&mut environment, None);
+        with_fake_gh(
+            &project,
+            &mut environment,
+            r#"#!/bin/sh
+printf '%s\n' "$3 $4" >> requests.log
+case "$3 $4" in
+  'GET orgs/socketry/teams/releasers/repos/socketry/example') ;;
+  'GET orgs/socketry/teams/managers/repos/socketry/example'|'GET orgs/socketry/teams/owners/repos/socketry/example')
+    printf '%s' '{"message":"Not Found","status":"404"}'; echo 'gh: Not Found (HTTP 404)' >&2; exit 1 ;;
+  'GET orgs/socketry/teams/denied/repos/socketry/example') echo 'gh: Forbidden (HTTP 403)' >&2; exit 1 ;;
+  *) echo unexpected-request >&2; exit 1 ;;
+esac
+"#,
+        );
+        let repository = Repository {
+            owner: "socketry".to_owned(),
+            name: "example".to_owned(),
+        };
+        let reviewers = ReviewerSet {
+            configured: vec![
+                "socketry/managers".to_owned(),
+                "socketry/releasers".to_owned(),
+                "socketry/owners".to_owned(),
+                "ioquatix".to_owned(),
+                "Team:9".to_owned(),
+            ],
+            resolved: vec![
+                "Team:1".to_owned(),
+                "Team:2".to_owned(),
+                "Team:3".to_owned(),
+                "User:4".to_owned(),
+                "Team:9".to_owned(),
+            ],
+        };
+        assert_eq!(
+            teams_without_access(&project.context(), &repository, &reviewers).unwrap(),
+            ["socketry/managers", "socketry/owners"]
+        );
+
+        std::fs::remove_file(project.root().join("requests.log")).unwrap();
+        let error = apply_setup(
+            &project.context(),
+            &repository,
+            "main",
+            0,
+            &["check".to_owned()],
+            &reviewers,
+            None,
+            "crates-io",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains(
+                "team(s) socketry/managers, socketry/owners cannot access socketry/example"
+            ),
+            "{error}"
+        );
+        assert!(error.contains("Nothing was changed"), "{error}");
+        assert!(
+            error.contains("\n  gh api --method PUT orgs/socketry/teams/managers/repos/socketry/example -f permission=maintain\n  gh api --method PUT orgs/socketry/teams/owners/repos/socketry/example -f permission=maintain"),
+            "{error}"
+        );
+        // Only the access checks ran: no ruleset, environment, or fork approval request was made.
+        let requests = std::fs::read_to_string(project.root().join("requests.log")).unwrap();
+        assert!(
+            requests
+                .lines()
+                .all(|request| request.starts_with("GET orgs/socketry/teams/")),
+            "{requests}"
+        );
+
+        let denied = ReviewerSet {
+            configured: vec!["socketry/denied".to_owned()],
+            resolved: vec!["Team:5".to_owned()],
+        };
+        assert!(
+            teams_without_access(&project.context(), &repository, &denied)
+                .unwrap_err()
+                .to_string()
+                .contains("Forbidden (HTTP 403)")
+        );
+    }
+
+    #[test]
+    fn verifies_that_github_kept_every_requested_reviewer() {
+        let mut environment = Environment::new();
+        let project = Project::new();
+        with_fake_gh(
+            &project,
+            &mut environment,
+            r#"#!/bin/sh
+case "$3 $4" in
+  'GET repos/socketry/example/environments/crates-io')
+    printf '%s' '{"protection_rules":[
+      {"type":"wait_timer","wait_timer":5},
+      {"type":"required_reviewers"},
+      {"type":"required_reviewers","reviewers":[
+        {"type":"User","reviewer":{"id":7}},
+        {},
+        {"type":7},
+        {"type":"Team"},
+        {"type":"Team","reviewer":{}},
+        {"type":"Team","reviewer":{"id":"not numeric"}}
+      ]}
+    ]}' ;;
+  'GET repos/socketry/example/environments/empty') printf '%s' '{}' ;;
+  *) echo unexpected-request >&2; exit 1 ;;
+esac
+"#,
+        );
+        let repository = Repository {
+            owner: "socketry".to_owned(),
+            name: "example".to_owned(),
+        };
+        let context = project.context();
+        let reviewers = ReviewerSet {
+            configured: vec![
+                "socketry/managers".to_owned(),
+                "alice".to_owned(),
+                "User:7".to_owned(),
+            ],
+            resolved: vec![
+                "Team:1".to_owned(),
+                "User:8".to_owned(),
+                "User:7".to_owned(),
+            ],
+        };
+
+        let kept = environment_payload(&["User:7".to_owned()], None, None);
+        verify_environment_reviewers(&context, &repository, "crates-io", &kept, &reviewers)
+            .unwrap();
+
+        let requested = environment_payload(&reviewers.resolved, None, None);
+        let error = verify_environment_reviewers(
+            &context,
+            &repository,
+            "crates-io",
+            &requested,
+            &reviewers,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("environment crates-io in socketry/example without required reviewer(s) Team:1 (socketry/managers), User:8"),
+            "{error}"
+        );
+        assert!(
+            error.contains("\n  gh api --method PUT orgs/socketry/teams/managers/repos/socketry/example -f permission=maintain\n"),
+            "{error}"
+        );
+        assert!(
+            error.contains("add each missing user as a collaborator"),
+            "{error}"
+        );
+
+        let team_only = ReviewerSet {
+            configured: vec!["socketry/managers".to_owned()],
+            resolved: vec!["Team:1".to_owned()],
+        };
+        let requested = environment_payload(&team_only.resolved, None, None);
+        let error =
+            verify_environment_reviewers(&context, &repository, "empty", &requested, &team_only)
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("Team:1 (socketry/managers)"), "{error}");
+        assert!(!error.contains("collaborator"), "{error}");
+
+        // Without requested reviewers there is nothing to verify, and GitHub is not asked.
+        verify_environment_reviewers(&context, &repository, "unrequested", &json!({}), &team_only)
+            .unwrap();
+    }
+
+    #[test]
+    fn apply_setup_fails_after_saving_when_github_drops_a_reviewer() {
+        let mut environment = Environment::new();
+        let project = Project::new();
+        project.single_package("fixture", "1.2.3");
+        project.cargo_proxy(&mut environment, None);
+        with_fake_gh(
+            &project,
+            &mut environment,
+            r#"#!/bin/sh
+case "$3 $4" in
+  'GET orgs/socketry/teams/managers/repos/socketry/example') ;;
+  'GET repos/socketry/example/environments?per_page=100') printf '%s' '{"environments":[]}' ;;
+  'GET repos/socketry/example/rulesets?per_page=100') printf '%s' '[]' ;;
+  'POST repos/socketry/example/rulesets') cat >/dev/null; printf '%s' '{}' ;;
+  'PUT repos/socketry/example/environments/crates-io') cat > requested-environment.json; printf '%s' '{}' ;;
+  'GET repos/socketry/example/environments/crates-io') printf '%s' '{"protection_rules":[]}' ;;
+  'GET repos/socketry/example/environments/crates-io/deployment-branch-policies?per_page=100') printf '%s' '{"branch_policies":[]}' ;;
+  'POST repos/socketry/example/environments/crates-io/deployment-branch-policies') cat >/dev/null; printf '%s' '{}' ;;
+  'GET repos/socketry/example/actions/permissions/fork-pr-contributor-approval') printf '%s' '{}' ;;
+  'PUT repos/socketry/example/actions/permissions/fork-pr-contributor-approval') cat >/dev/null ;;
+  *) echo unexpected-request >&2; exit 1 ;;
+esac
+"#,
+        );
+        let repository = Repository {
+            owner: "socketry".to_owned(),
+            name: "example".to_owned(),
+        };
+        let reviewers = ReviewerSet {
+            configured: vec!["socketry/managers".to_owned()],
+            resolved: vec!["Team:1".to_owned()],
+        };
+        let error = apply_setup(
+            &project.context(),
+            &repository,
+            "main",
+            0,
+            &["check".to_owned()],
+            &reviewers,
+            None,
+            "crates-io",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("without required reviewer(s) Team:1 (socketry/managers)"),
+            "{error}"
+        );
+        let environment_body: JsonValue = serde_json::from_slice(
+            &std::fs::read(project.root().join("requested-environment.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            environment_body["reviewers"],
+            json!([{"type": "Team", "id": 1}])
         );
     }
 }

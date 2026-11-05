@@ -1,5 +1,9 @@
 # Releases
 
+## Unreleased
+
+- Block updates to release tags, as well as deletion, in the release tag ruleset that `cargo:setup:github:apply` manages, so nobody can move a published tag to another commit.
+
 ## v0.7.0
 
 - Add `cargo:release:patch`, `cargo:release:minor`, `cargo:release:major`, and `cargo:release:bump --version X.Y.Z`, which from a clean checkout of the release branch create a `release-{tag}` branch, bump the version, commit with the `Release: {tag}` trailer, validate the candidate, push, and open the release pull request with the release notes and trailer as its body.

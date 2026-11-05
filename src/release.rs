@@ -9,7 +9,186 @@ use base_markdown::{
 use serde_json::json;
 use std::fs;
 
+use crate::version_support::Component;
+
+/// Bump the patch version, commit it with the release trailer, validate it, and open the release pull request.
+#[bake::task(name = "cargo:release:patch")]
+pub fn patch(context: &mut Context, #[bake(default = "main")] branch: String) -> Result<Value> {
+    start(context, Bump::Component(Component::Patch), &branch)
+}
+
+/// Bump the minor version, commit it with the release trailer, validate it, and open the release pull request.
+#[bake::task(name = "cargo:release:minor")]
+pub fn minor(context: &mut Context, #[bake(default = "main")] branch: String) -> Result<Value> {
+    start(context, Bump::Component(Component::Minor), &branch)
+}
+
+/// Bump the major version, commit it with the release trailer, validate it, and open the release pull request.
+#[bake::task(name = "cargo:release:major")]
+pub fn major(context: &mut Context, #[bake(default = "main")] branch: String) -> Result<Value> {
+    start(context, Bump::Component(Component::Major), &branch)
+}
+
+/// Set an explicit version, commit it with the release trailer, validate it, and open the release pull request.
+#[bake::task(name = "cargo:release:bump")]
+pub fn bump(
+    context: &mut Context,
+    #[bake(
+        named,
+        help = "New stable workspace version in MAJOR.MINOR.PATCH form."
+    )]
+    version: String,
+    #[bake(default = "main")] branch: String,
+) -> Result<Value> {
+    start(context, Bump::Version(version), &branch)
+}
+
+enum Bump {
+    Component(Component),
+    Version(String),
+}
+
+impl Bump {
+    fn apply(&self, context: &mut Context) -> Result<Value> {
+        match self {
+            Self::Component(Component::Patch) => crate::version::patch(context),
+            Self::Component(Component::Minor) => crate::version::minor(context),
+            Self::Component(Component::Major) => crate::version::major(context),
+            Self::Version(version) => crate::version::bump(context, version.clone()),
+        }
+    }
+
+    fn subject(&self) -> String {
+        match self {
+            Self::Component(Component::Patch) => "Bump patch version.".to_owned(),
+            Self::Component(Component::Minor) => "Bump minor version.".to_owned(),
+            Self::Component(Component::Major) => "Bump major version.".to_owned(),
+            Self::Version(version) => format!("Bump version to {version}."),
+        }
+    }
+}
+
+/// Prepare a release from a clean checkout of `base`: a `release-{tag}` branch
+/// with one commit carrying the `Release: {tag}` trailer, validated by
+/// `prepare`, pushed, and opened as a pull request whose body ends with the
+/// same trailer so a squash merge configured to use the body keeps it.
+fn start(context: &mut Context, bump: Bump, base: &str) -> Result<Value> {
+    crate::github::validate_branch(base)?;
+    let status = run(
+        context,
+        "git",
+        &["status", "--porcelain", "--untracked-files=no"],
+    )?;
+    if !status.is_empty() {
+        return Err(Error::new(
+            "the working tree has uncommitted changes; commit or stash them before starting a release",
+        ));
+    }
+    let current = run(context, "git", &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    if current != base {
+        return Err(Error::new(format!(
+            "releases start from the {base} branch, but {current} is checked out"
+        )));
+    }
+
+    let bumped = bump.apply(context)?;
+    open_pull_request(context, &bump, base, &bumped)
+}
+
+/// Commit the bumped version, validate it, push, and open the pull request.
+fn open_pull_request(context: &Context, bump: &Bump, base: &str, bumped: &Value) -> Result<Value> {
+    let version = new_version(bumped)?;
+    let tag = crate::release_tag(context, &version)?;
+    let branch = format!("release-{tag}");
+    let subject = bump.subject();
+    let trailer = format!("Release: {tag}");
+    run(context, "git", &["switch", "--create", &branch])?;
+    run(
+        context,
+        "git",
+        &[
+            "commit",
+            "--all",
+            "--message",
+            &subject,
+            "--message",
+            &trailer,
+        ],
+    )?;
+
+    let prepared = package(context, &version).map_err(|error| {
+        Error::new(format!(
+            "{error}; the release commit remains on the {branch} branch for inspection"
+        ))
+    })?;
+
+    let body = format!("{}\n\n{trailer}\n", prepared.notes.trim());
+    run(
+        context,
+        "git",
+        &["push", "--set-upstream", "origin", &branch],
+    )?;
+    let pull_request = run(
+        context,
+        "gh",
+        &[
+            "pr", "create", "--base", base, "--head", &branch, "--title", &subject, "--body", &body,
+        ],
+    )?;
+
+    Ok(json!({
+        "version": version,
+        "tag": tag,
+        "branch": branch,
+        "packages": prepared.packages,
+        "pull_request": pull_request,
+        "next": format!("Review and merge the pull request, keeping the {trailer} trailer on the merged commit, then approve the publishing environment deployment."),
+    }))
+}
+
+fn new_version(result: &Value) -> Result<String> {
+    result
+        .get("version")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| Error::new("version task did not return the new workspace version"))
+}
+
+fn run(context: &Context, program: &str, arguments: &[&str]) -> Result<String> {
+    let output = context
+        .command(program)
+        .args(arguments)
+        .output()
+        .map_err(|error| Error::new(format!("could not start `{program}`: {error}")))?;
+    if !output.status.success() {
+        return Err(Error::new(format!(
+            "{program} {} failed: {}",
+            arguments.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
 pub(crate) fn prepare(context: &Context, version: &str) -> Result<Value> {
+    let prepared = package(context, version)?;
+
+    Ok(json!({
+        "version": version,
+        "tag": prepared.tag,
+        "packages": prepared.packages,
+        "status": "ready for a release pull request",
+        "next": format!("Commit the reviewed release changes with a Release: {} Git trailer, then open a pull request. Preserve that trailer on the final merged commit to request publishing after the crates-io environment approval.", prepared.tag),
+    }))
+}
+
+struct Prepared {
+    tag: String,
+    packages: Vec<String>,
+    notes: String,
+}
+
+fn package(context: &Context, version: &str) -> Result<Prepared> {
     let tag = crate::release_tag(context, version)?;
     let packages = crate::cargo_support::workspace_packages(context)?;
     if packages.is_empty() {
@@ -30,12 +209,14 @@ pub(crate) fn prepare(context: &Context, version: &str) -> Result<Value> {
             release_notes_path.display()
         )));
     }
-    bake_releases::extract_notes(&release_notes, &tag).map_err(|error| {
-        Error::new(format!(
-            "could not extract release notes from {}: {error}",
-            release_notes_path.display()
-        ))
-    })?;
+    let notes = bake_releases::extract_notes(&release_notes, &tag)
+        .map_err(|error| {
+            Error::new(format!(
+                "could not extract release notes from {}: {error}",
+                release_notes_path.display()
+            ))
+        })?
+        .to_owned();
 
     let mut package_arguments = vec!["package".to_owned(), "--locked".to_owned()];
     for package in &packages {
@@ -43,13 +224,11 @@ pub(crate) fn prepare(context: &Context, version: &str) -> Result<Value> {
     }
     crate::cargo_support::run_cargo_arguments(context, &package_arguments)?;
 
-    Ok(json!({
-        "version": version,
-        "tag": tag,
-        "packages": packages.iter().map(|package| package.name.as_str()).collect::<Vec<_>>(),
-        "status": "ready for a release pull request",
-        "next": format!("Commit the reviewed release changes with a Release: {tag} Git trailer, then open a pull request. Preserve that trailer on the final merged commit to request publishing after the crates-io environment approval."),
-    }))
+    Ok(Prepared {
+        tag,
+        packages: packages.into_iter().map(|package| package.name).collect(),
+        notes,
+    })
 }
 
 pub(crate) fn contains_release_heading(release_notes: &str, tag: &str) -> bool {
@@ -199,5 +378,361 @@ mod tests {
         failed_package.write("releases.md", "## v1.2.3\n\nNotes.\n");
         failed_package.cargo_proxy(&mut environment, Some("package"));
         assert!(prepare(&failed_package.context(), "1.2.3").is_err());
+    }
+
+    mod start {
+        use super::super::{Bump, new_version, run};
+        use crate::test_support::{Environment, Project};
+        use crate::version_support::Component;
+        use bake::{Context, Registry, Result};
+        use serde_json::json;
+        use std::process::Command;
+
+        #[bake::task(name = "cargo:after_version_bump")]
+        fn rename_unreleased(context: &mut Context, version: String) -> Result<()> {
+            let path = context.root().join("releases.md");
+            let document = std::fs::read_to_string(&path).unwrap();
+            let renamed = document.replace("## Unreleased", &format!("## v{version}"));
+            std::fs::write(&path, renamed).unwrap();
+            Ok(())
+        }
+
+        fn git(root: &std::path::Path, arguments: &[&str]) -> String {
+            let output = Command::new("git")
+                .current_dir(root)
+                .args(arguments)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {arguments:?} failed");
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        }
+
+        struct Fixture {
+            project: Project,
+            origin: Project,
+        }
+
+        impl Fixture {
+            /// A committed single-package checkout of `main` with an empty bare origin,
+            /// a logging `gh`, and proxies for `cargo` and `git`.
+            fn new(environment: &mut Environment) -> Self {
+                for name in ["GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME"] {
+                    environment.set(name, "Fixture");
+                }
+                for name in ["GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"] {
+                    environment.set(name, "fixture@example.com");
+                }
+                environment.set("GIT_CONFIG_GLOBAL", "/dev/null");
+                environment.set("GIT_CONFIG_NOSYSTEM", "1");
+
+                let project = Project::new();
+                project.single_package("fixture", "1.2.3");
+                project.write(
+                    "releases.md",
+                    "# Releases\n\n## Unreleased\n\n- A change.\n\n## v1.2.3\n\n- Earlier.\n",
+                );
+                project.cargo_proxy(environment, None);
+                project.executable(
+                    "gh",
+                    "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$BAKE_TEST_GH_LOG\"\nif [ -n \"$BAKE_TEST_GH_FAILURE\" ]; then echo 'fake gh failure' >&2; exit 1; fi\nprintf 'https://github.com/socketry/fixture/pull/7\\n'\n",
+                );
+                environment.set(
+                    "BAKE_TEST_GH_LOG",
+                    project.root().join("gh-arguments.log").as_os_str(),
+                );
+                environment.set("BAKE_TEST_GH_FAILURE", "");
+                project.git_proxy(environment, None);
+
+                let origin = Project::new();
+                git(origin.root(), &["init", "--quiet", "--bare"]);
+                git(
+                    project.root(),
+                    &["init", "--quiet", "--initial-branch=main"],
+                );
+                git(
+                    project.root(),
+                    &["remote", "add", "origin", origin.root().to_str().unwrap()],
+                );
+                git(project.root(), &["add", "."]);
+                git(
+                    project.root(),
+                    &["commit", "--quiet", "--message", "Initial commit."],
+                );
+                Self { project, origin }
+            }
+
+            fn context(&self) -> Context {
+                let mut registry = Registry::new();
+                registry.register(rename_unreleased_task()).unwrap();
+                registry.context(self.project.root())
+            }
+
+            fn gh_arguments(&self) -> String {
+                std::fs::read_to_string(self.project.root().join("gh-arguments.log"))
+                    .unwrap_or_default()
+            }
+        }
+
+        #[test]
+        fn opens_a_release_pull_request_for_each_kind_of_bump() {
+            let mut environment = Environment::new();
+            type Task = fn(&mut Context) -> Result<serde_json::Value>;
+            let cases: [(&str, Task, &str, &str); 4] = [
+                (
+                    "patch",
+                    |context| super::super::patch(context, "main".to_owned()),
+                    "1.2.4",
+                    "Bump patch version.",
+                ),
+                (
+                    "minor",
+                    |context| super::super::minor(context, "main".to_owned()),
+                    "1.3.0",
+                    "Bump minor version.",
+                ),
+                (
+                    "major",
+                    |context| super::super::major(context, "main".to_owned()),
+                    "2.0.0",
+                    "Bump major version.",
+                ),
+                (
+                    "bump",
+                    |context| super::super::bump(context, "3.1.0".to_owned(), "main".to_owned()),
+                    "3.1.0",
+                    "Bump version to 3.1.0.",
+                ),
+            ];
+            for (name, task, version, subject) in cases {
+                let fixture = Fixture::new(&mut environment);
+                let result = task(&mut fixture.context()).unwrap();
+                let tag = format!("v{version}");
+                let branch = format!("release-{tag}");
+                assert_eq!(result["version"], version, "{name}");
+                assert_eq!(result["tag"], tag, "{name}");
+                assert_eq!(result["branch"], branch, "{name}");
+                assert_eq!(result["packages"], json!(["fixture"]), "{name}");
+                assert_eq!(
+                    result["pull_request"], "https://github.com/socketry/fixture/pull/7",
+                    "{name}"
+                );
+
+                let root = fixture.project.root();
+                assert_eq!(git(root, &["rev-parse", "--abbrev-ref", "HEAD"]), branch);
+                assert_eq!(git(root, &["log", "-1", "--format=%s"]), subject);
+                assert_eq!(
+                    git(
+                        root,
+                        &["log", "-1", "--format=%(trailers:key=Release,valueonly)"]
+                    ),
+                    tag
+                );
+                assert_eq!(
+                    git(root, &["status", "--porcelain", "--untracked-files=no"]),
+                    ""
+                );
+                assert!(
+                    std::fs::read_to_string(root.join("releases.md"))
+                        .unwrap()
+                        .contains(&format!("## {tag}\n"))
+                );
+                assert_eq!(
+                    git(fixture.origin.root(), &["rev-parse", &branch]),
+                    git(root, &["rev-parse", "HEAD"])
+                );
+                assert!(
+                    fixture
+                        .project
+                        .cargo_arguments()
+                        .contains("package --locked --package fixture")
+                );
+
+                let gh_arguments = fixture.gh_arguments();
+                assert!(
+                    gh_arguments.starts_with("pr\ncreate\n--base\nmain\n--head\n"),
+                    "{gh_arguments}"
+                );
+                assert!(
+                    gh_arguments.contains(&format!(
+                        "--title\n{subject}\n--body\n- A change.\n\nRelease: {tag}\n"
+                    )),
+                    "{gh_arguments}"
+                );
+            }
+        }
+
+        #[test]
+        fn refuses_to_start_from_a_dirty_tree_or_another_branch() {
+            let mut environment = Environment::new();
+            let fixture = Fixture::new(&mut environment);
+            let root = fixture.project.root();
+
+            assert!(
+                super::super::patch(&mut fixture.context(), "release/1".to_owned())
+                    .unwrap_err()
+                    .to_string()
+                    .contains("branch must contain")
+            );
+
+            fixture.project.write("src/lib.rs", "// changed\n");
+            assert!(
+                super::super::patch(&mut fixture.context(), "main".to_owned())
+                    .unwrap_err()
+                    .to_string()
+                    .contains("uncommitted changes")
+            );
+            git(root, &["checkout", "--quiet", "--", "src/lib.rs"]);
+
+            git(root, &["switch", "--quiet", "--create", "feature"]);
+            let error = super::super::patch(&mut fixture.context(), "main".to_owned()).unwrap_err();
+            assert!(
+                error.to_string().contains("feature is checked out"),
+                "{error}"
+            );
+            assert_eq!(fixture.gh_arguments(), "");
+        }
+
+        #[test]
+        fn leaves_the_release_branch_when_a_later_stage_fails() {
+            let mut environment = Environment::new();
+
+            let fixture = Fixture::new(&mut environment);
+            assert!(
+                super::super::bump(
+                    &mut fixture.context(),
+                    "1.0.0".to_owned(),
+                    "main".to_owned()
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("must be greater")
+            );
+            assert_eq!(
+                git(
+                    fixture.project.root(),
+                    &["rev-parse", "--abbrev-ref", "HEAD"]
+                ),
+                "main"
+            );
+
+            let fixture = Fixture::new(&mut environment);
+            git(fixture.project.root(), &["branch", "release-v1.2.4"]);
+            assert!(
+                super::super::patch(&mut fixture.context(), "main".to_owned())
+                    .unwrap_err()
+                    .to_string()
+                    .contains("git switch")
+            );
+
+            let fixture = Fixture::new(&mut environment);
+            environment.set("BAKE_TEST_GIT_FAILURE", "commit");
+            assert!(
+                super::super::patch(&mut fixture.context(), "main".to_owned())
+                    .unwrap_err()
+                    .to_string()
+                    .contains("git commit")
+            );
+
+            let fixture = Fixture::new(&mut environment);
+            environment.set("BAKE_TEST_CARGO_FAILURE", "package");
+            let error = super::super::patch(&mut fixture.context(), "main".to_owned()).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("remains on the release-v1.2.4 branch"),
+                "{error}"
+            );
+            assert_eq!(
+                git(
+                    fixture.project.root(),
+                    &["rev-parse", "--abbrev-ref", "HEAD"]
+                ),
+                "release-v1.2.4"
+            );
+            assert_eq!(fixture.gh_arguments(), "");
+
+            let fixture = Fixture::new(&mut environment);
+            environment.set("BAKE_TEST_GIT_FAILURE", "push");
+            assert!(
+                super::super::patch(&mut fixture.context(), "main".to_owned())
+                    .unwrap_err()
+                    .to_string()
+                    .contains("git push")
+            );
+            assert_eq!(fixture.gh_arguments(), "");
+
+            let fixture = Fixture::new(&mut environment);
+            environment.set("BAKE_TEST_GH_FAILURE", "1");
+            assert!(
+                super::super::patch(&mut fixture.context(), "main".to_owned())
+                    .unwrap_err()
+                    .to_string()
+                    .contains("fake gh failure")
+            );
+            assert_eq!(
+                git(fixture.origin.root(), &["rev-parse", "release-v1.2.4"]).len(),
+                40
+            );
+        }
+
+        #[test]
+        fn reports_git_failures_before_changing_anything() {
+            let mut environment = Environment::new();
+            let fixture = Fixture::new(&mut environment);
+            for stage in ["status", "rev-parse"] {
+                environment.set("BAKE_TEST_GIT_FAILURE", stage);
+                let error =
+                    super::super::patch(&mut fixture.context(), "main".to_owned()).unwrap_err();
+                assert!(error.to_string().contains("fake git failure"), "{error}");
+            }
+            environment.set("BAKE_TEST_GIT_FAILURE", "");
+            assert_eq!(
+                git(fixture.project.root(), &["log", "--format=%s"]),
+                "Initial commit."
+            );
+
+            let bump = Bump::Component(Component::Patch);
+            assert!(
+                super::super::open_pull_request(&fixture.context(), &bump, "main", &json!({}))
+                    .unwrap_err()
+                    .to_string()
+                    .contains("did not return")
+            );
+            fixture.project.write(
+                "Cargo.toml",
+                "[package]\nname = \"fixture\"\nversion = \"1.2.4\"\nedition = \"2024\"\n\n[package.metadata.bake.release]\ntag-prefix = \"-bad\"\n",
+            );
+            assert!(
+                super::super::open_pull_request(
+                    &fixture.context(),
+                    &bump,
+                    "main",
+                    &json!({"version": "1.2.4"})
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("prefix")
+            );
+        }
+
+        #[test]
+        fn reports_missing_programs_and_version_results() {
+            let project = Project::new();
+            assert!(
+                run(
+                    &project.context(),
+                    "bake-cargo-missing-program",
+                    &["--version"]
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("could not start")
+            );
+            assert!(new_version(&json!({})).is_err());
+            assert_eq!(
+                Bump::Component(Component::Major).subject(),
+                "Bump major version."
+            );
+        }
     }
 }

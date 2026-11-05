@@ -1,5 +1,11 @@
 # Releases
 
+## Unreleased
+
+- Add `cargo:release:patch`, `cargo:release:minor`, `cargo:release:major`, and `cargo:release:bump --version X.Y.Z`, which from a clean checkout of the release branch create a `release-{tag}` branch, bump the version, commit with the `Release: {tag}` trailer, validate the candidate, push, and open the release pull request with the release notes and trailer as its body.
+- Remove the `cargo:version:patch`, `cargo:version:minor`, `cargo:version:major`, and `cargo:version:bump` tasks. The `cargo:release:*` tasks perform the same version update and run the `cargo:after_version_bump` hook, so a release is one command followed by review and merge.
+- Set the repository's squash merge commit title and message to the pull request title and body in `cargo:setup:github:apply`, and show the setting in `cargo:setup:github:plan`, so the release trailer survives a squash merge with review fix-ups.
+
 ## v0.6.1
 
 - Fail `cargo:setup:github:apply` before changing anything when a reviewer team cannot access the repository, printing the command that grants access, and list such teams in `cargo:setup:github:plan`. After saving the environment, read it back and fail when GitHub has silently dropped a requested reviewer.

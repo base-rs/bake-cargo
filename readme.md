@@ -21,7 +21,15 @@ Workspace discovery uses `cargo metadata --no-deps` and ignores packages marked 
 
 ## Versioning and releases
 
-The `cargo:version:patch`, `cargo:version:minor`, and `cargo:version:major` tasks update the shared stable version of all publishable packages in the workspace. `cargo:version:bump --version X.Y.Z` sets an explicit higher version. These tasks preserve TOML formatting, update version requirements for in-workspace dependencies, and refresh `Cargo.lock`. After the update, they optionally call a project task named `cargo:after_version_bump`, passing the new version. If that task is absent, the version bump completes without a hook. A project can use the hook to run `license:update`, update `releases.md`, or perform other project-specific work:
+A release starts with one task from a clean checkout of the release branch (`--branch`, default `main`):
+
+```bash
+cargo bake cargo:release:patch
+```
+
+`cargo:release:minor` and `cargo:release:major` increment the other components, and `cargo:release:bump --version X.Y.Z` sets an explicit higher version. The task creates a `release-{tag}` branch, updates the shared stable version of all publishable packages in the workspace (preserving TOML formatting, updating version requirements for in-workspace dependencies, and refreshing `Cargo.lock`), and calls the project task named `cargo:after_version_bump` with the new version when one is registered. It then commits the result with the `Release: {tag}` trailer, validates and packages the committed candidate with `cargo:release`, pushes the branch, and opens a pull request with `gh` whose body is the release notes followed by the same trailer. The task refuses to start from a tree with uncommitted tracked changes or from another branch, and when validation fails after the commit it leaves the release branch in place for inspection. It never tags or publishes; review and merge the pull request, then approve the publishing environment deployment.
+
+A project uses the `cargo:after_version_bump` hook to run `license:update`, update `releases.md`, or perform other project-specific work:
 
 ```rust,ignore
 #[bake::task(name = "cargo:after_version_bump")]
@@ -33,11 +41,9 @@ fn after_version_bump(context: &mut bake::Context, version: String) -> bake::Res
 }
 ```
 
-Projects using `base-project` get a standard hook that updates the license, release notes, and generated Readme sections.
+Projects using `base-project` get a standard hook that updates the license, release notes, and generated Readme sections. Review the release commit before merging the pull request; `releases.md` must contain a heading for the new tag, which the hook creates from the `## Unreleased` section.
 
-Review the changes made by the hook before committing the release.
-
-After updating the shared version and adding the matching release-notes heading, commit the version, release notes, and any other release changes. Then run `cargo:release` to validate and package the committed release candidate. It does not create a tag or publish anything. Include exactly one Git trailer naming the intended tag in the final release commit:
+The release commit carries exactly one Git trailer naming the intended tag:
 
 ```text
 Bump patch version.
@@ -45,7 +51,9 @@ Bump patch version.
 Release: v0.5.0
 ```
 
-By default, the tag is `v` followed by the exact Cargo workspace version. Set `tag-prefix` in `[workspace.metadata.bake.release]` (or `[package.metadata.bake.release]` for a single package) to use a different prefix. For example, `tag-prefix = "base-v"` produces `base-v0.1.0`. Use the same full tag in the release-notes heading and the `Release:` trailer. Prefixes may contain ASCII letters, numbers, hyphens, and underscores, and must not start with a hyphen; an empty prefix is supported. Keep the trailer on the latest commit of the release pull request, including after review fixes. Open a pull request for review. When squash merging, explicitly preserve the trailer at the end of the resulting commit message (for example, pass a body file containing the trailer to `gh pr merge --squash --body-file`). Rebase merging preserves the individual commit messages; the final commit must carry the trailer. A missing trailer means no release, even when the version changed.
+By default, the tag is `v` followed by the exact Cargo workspace version. Set `tag-prefix` in `[workspace.metadata.bake.release]` (or `[package.metadata.bake.release]` for a single package) to use a different prefix. For example, `tag-prefix = "base-v"` produces `base-v0.1.0`. Prefixes may contain ASCII letters, numbers, hyphens, and underscores, and must not start with a hyphen; an empty prefix is supported. The release-notes heading, the trailer, and the pull request body all use the same full tag.
+
+The trailer must end the final merged commit message; a missing trailer means no release, even when the version changed. `cargo:setup:github:apply` configures the repository to build squash commits from the pull request title and body, so a release pull request merges correctly from the GitHub UI or `gh pr merge --squash` regardless of review fix-up commits. Without that setting, GitHub concatenates the commit messages and a fix-up buries the trailer; pass a body file containing the trailer to `gh pr merge --squash --body-file` instead. Rebase merging preserves the individual commit messages, so the last commit must carry the trailer. The publish workflow runs `cargo:release` on every candidate to validate and package the committed tree.
 
 ## GitHub workflow and repository settings
 
@@ -91,7 +99,7 @@ gh api --method PUT orgs/base-rs/teams/maintainers/repos/base-rs/PROJECT -f perm
 
 The plan lists reviewer teams without access under `reviewers.missing_repository_access`, with the command that grants it. The apply task checks each team named as `organization/team` before changing anything, and fails with that command when a team lacks access; it does not grant access itself, since that is a permission change for a maintainer to make deliberately. After saving the environment, the apply task reads it back and fails, naming the missing reviewers and how to fix them, when GitHub has dropped any requested reviewer, including users who are not collaborators and teams given as `Team:ID`.
 
-If `--repository owner/name` is omitted, the GitHub repository is inferred from the `origin` Git remote. `--checks` is repeatable and should match status check names already reported by GitHub. When `--wait-timer` is omitted, the existing environment wait timer is left unchanged. At least one reviewer is required, and the selected list replaces the environment's current reviewer list. Both tasks use the authenticated `gh` CLI to resolve reviewer names. The apply task also needs permission to manage repository rulesets and environments. It creates or updates the two rulesets managed by this package and configures the named environment's wait timer, reviewer list, and deployment branch policy. An environment that deploys from all branches is restricted to the `--branch` branch protected by the managed ruleset, so only merged changes can publish; an existing branch policy is kept. The task uses a named branch policy rather than GitHub's protected-branches option, which does not recognize branches protected only by rulesets. The apply task also requires maintainer approval before running workflows for first-time contributors' fork pull requests, keeping a stricter existing policy that requires approval for all external contributors. Existing managed rulesets are replaced with the reviewed desired settings; unrelated rulesets are left alone. When `--checks` is omitted, the ruleset requires the publishing workflow's `check` job and the testing workflow's stable `test-result` aggregate job. Configure at least one required reviewer on the `crates-io` environment to require approval before publishing. The setup allows the workflow initiator to approve their own deployment, so a maintainer releases with one approval click rather than a bypass. GitHub administrators can bypass environment rules by default. To make approval mandatory for administrators too, disable that bypass in the environment's GitHub settings. Tag pushes do not trigger publication.
+If `--repository owner/name` is omitted, the GitHub repository is inferred from the `origin` Git remote. `--checks` is repeatable and should match status check names already reported by GitHub. When `--wait-timer` is omitted, the existing environment wait timer is left unchanged. At least one reviewer is required, and the selected list replaces the environment's current reviewer list. Both tasks use the authenticated `gh` CLI to resolve reviewer names. The apply task also needs permission to manage repository rulesets and environments. It creates or updates the two rulesets managed by this package and configures the named environment's wait timer, reviewer list, and deployment branch policy. An environment that deploys from all branches is restricted to the `--branch` branch protected by the managed ruleset, so only merged changes can publish; an existing branch policy is kept. The task uses a named branch policy rather than GitHub's protected-branches option, which does not recognize branches protected only by rulesets. The apply task also requires maintainer approval before running workflows for first-time contributors' fork pull requests, keeping a stricter existing policy that requires approval for all external contributors, and sets the repository's squash merge commit title and message to the pull request title and body so release trailers survive squash merges. Existing managed rulesets are replaced with the reviewed desired settings; unrelated rulesets are left alone. When `--checks` is omitted, the ruleset requires the publishing workflow's `check` job and the testing workflow's stable `test-result` aggregate job. Configure at least one required reviewer on the `crates-io` environment to require approval before publishing. The setup allows the workflow initiator to approve their own deployment, so a maintainer releases with one approval click rather than a bypass. GitHub administrators can bypass environment rules by default. To make approval mandatory for administrators too, disable that bypass in the environment's GitHub settings. Tag pushes do not trigger publication.
 
 ## Trusted publishing
 
@@ -123,11 +131,11 @@ cargo bake cargo:releases:github:release vX.Y.Z --draft true
 
 The task uses the authenticated `gh` CLI. Omit `--draft true` to publish the release immediately.
 
-The Cargo release integration supports crates.io and GitHub Actions. It edits Cargo package version fields and local dependency requirements, but does not commit changes or publish crates itself. The GitHub release task publishes a GitHub Release explicitly. The setup task only manages its named repository rulesets, and GitHub may require repository or organization plan features for some settings.
+The Cargo release integration supports crates.io and GitHub Actions. The `cargo:release:*` tasks edit Cargo package version fields and local dependency requirements, commit, push, and open a pull request, but never tag or publish. The GitHub release task publishes a GitHub Release explicitly. The setup task only manages its named repository rulesets, and GitHub may require repository or organization plan features for some settings.
 
 ## Releasing
 
-Prepare a release with `cargo bake cargo:version:patch` (or `minor`, `major`, or `bump --version X.Y.Z`), commit it with a `Release: vVERSION` trailer, then run `cargo bake cargo:release` and open a pull request. After review and merge, GitHub Actions publishes the release when the configured `crates-io` environment approves it, then creates or updates the matching GitHub Release from `releases.md`. Follow the shared [Releasing skill](https://github.com/base-rs/base-project/blob/main/context/releasing.md) for the standard process.
+Prepare a release with `cargo bake cargo:release:patch` (or `minor`, `major`, or `bump --version X.Y.Z`) from a clean checkout of `main`; it bumps the version, commits with the `Release: vVERSION` trailer, validates the candidate, and opens the pull request. After review and merge, GitHub Actions publishes the release when the configured `crates-io` environment approves it, then creates or updates the matching GitHub Release from `releases.md`. Follow the shared [Releasing skill](https://github.com/base-rs/base-project/blob/main/context/releasing.md) for the standard process.
 
 ## Releases
 

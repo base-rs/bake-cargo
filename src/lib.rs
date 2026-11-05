@@ -31,7 +31,10 @@ use std::path::PathBuf;
 
 use crate::{cargo_support as cargo_helpers, github as github_helpers};
 
-/// Validate and package a release candidate before opening a reviewed pull request.
+/// Validate and package the committed release candidate.
+///
+/// The `cargo:release:*` tasks run this after committing the version bump, and
+/// the publish workflow runs it on every release candidate.
 #[bake::task]
 pub fn release(context: &mut Context) -> Result<Value> {
     let version = crate::version_support::workspace_version(context)?.to_string();
@@ -291,7 +294,10 @@ pub mod trusted_publishing {
 }
 
 /// Change the shared stable version of the publishable Cargo workspace packages.
-pub mod version {
+///
+/// These run inside the `cargo:release:*` tasks, which commit the result with
+/// the release trailer; they are not tasks of their own.
+pub(crate) mod version {
     use bake::{Context, Error, Result, Value};
 
     fn run_after_version_bump(context: &mut Context, result: &Value) -> Result<()> {
@@ -305,8 +311,7 @@ pub mod version {
     }
 
     /// Increment the patch component of the workspace version.
-    #[bake::task]
-    pub fn patch(context: &mut Context) -> Result<Value> {
+    pub(crate) fn patch(context: &mut Context) -> Result<Value> {
         let result =
             crate::version_support::increment(context, crate::version_support::Component::Patch)?;
         run_after_version_bump(context, &result)?;
@@ -314,8 +319,7 @@ pub mod version {
     }
 
     /// Increment the minor component and reset patch to zero.
-    #[bake::task]
-    pub fn minor(context: &mut Context) -> Result<Value> {
+    pub(crate) fn minor(context: &mut Context) -> Result<Value> {
         let result =
             crate::version_support::increment(context, crate::version_support::Component::Minor)?;
         run_after_version_bump(context, &result)?;
@@ -323,8 +327,7 @@ pub mod version {
     }
 
     /// Increment the major component and reset minor and patch to zero.
-    #[bake::task]
-    pub fn major(context: &mut Context) -> Result<Value> {
+    pub(crate) fn major(context: &mut Context) -> Result<Value> {
         let result =
             crate::version_support::increment(context, crate::version_support::Component::Major)?;
         run_after_version_bump(context, &result)?;
@@ -332,15 +335,7 @@ pub mod version {
     }
 
     /// Set the workspace to an explicit stable version greater than its current version.
-    #[bake::task]
-    pub fn bump(
-        context: &mut Context,
-        #[bake(
-            named,
-            help = "New stable workspace version in MAJOR.MINOR.PATCH form."
-        )]
-        version: String,
-    ) -> Result<Value> {
+    pub(crate) fn bump(context: &mut Context, version: String) -> Result<Value> {
         let result = crate::version_support::set(context, &version)?;
         run_after_version_bump(context, &result)?;
         Ok(result)
@@ -958,7 +953,7 @@ mod task_tests {
         install_gh(
             &project,
             &mut environment,
-            "#!/bin/sh\ncase \"$3 $4\" in\n  'GET repos/socketry/fixture/environments?per_page=100') printf '%s' '{\"environments\":[]}' ;;\n  'GET repos/socketry/fixture/rulesets?per_page=100') printf '%s' '[]' ;;\n  'POST repos/socketry/fixture/rulesets') cat >/dev/null; printf '%s' '{}' ;;\n  'PUT repos/socketry/fixture/environments/crates-io') cat >/dev/null; printf '%s' '{}' ;;\n  'GET repos/socketry/fixture/environments/crates-io') printf '%s' '{\"protection_rules\":[{\"type\":\"required_reviewers\",\"reviewers\":[{\"type\":\"User\",\"reviewer\":{\"id\":123}}]}]}' ;;\n  'GET repos/socketry/fixture/environments/crates-io/deployment-branch-policies?per_page=100') printf '%s' '{\"branch_policies\":[]}' ;;\n  'POST repos/socketry/fixture/environments/crates-io/deployment-branch-policies') cat >/dev/null; printf '%s' '{\"name\":\"main\",\"type\":\"branch\"}' ;;\n  'GET repos/socketry/fixture/actions/permissions/fork-pr-contributor-approval') printf '%s' '{\"approval_policy\":\"first_time_contributors\"}' ;;\n  'PUT repos/socketry/fixture/actions/permissions/fork-pr-contributor-approval') cat >/dev/null ;;\n  *) echo unexpected-request >&2; exit 1 ;;\nesac\n",
+            "#!/bin/sh\ncase \"$3 $4\" in\n  'GET repos/socketry/fixture/environments?per_page=100') printf '%s' '{\"environments\":[]}' ;;\n  'GET repos/socketry/fixture/rulesets?per_page=100') printf '%s' '[]' ;;\n  'POST repos/socketry/fixture/rulesets') cat >/dev/null; printf '%s' '{}' ;;\n  'PUT repos/socketry/fixture/environments/crates-io') cat >/dev/null; printf '%s' '{}' ;;\n  'GET repos/socketry/fixture/environments/crates-io') printf '%s' '{\"protection_rules\":[{\"type\":\"required_reviewers\",\"reviewers\":[{\"type\":\"User\",\"reviewer\":{\"id\":123}}]}]}' ;;\n  'GET repos/socketry/fixture/environments/crates-io/deployment-branch-policies?per_page=100') printf '%s' '{\"branch_policies\":[]}' ;;\n  'POST repos/socketry/fixture/environments/crates-io/deployment-branch-policies') cat >/dev/null; printf '%s' '{\"name\":\"main\",\"type\":\"branch\"}' ;;\n  'GET repos/socketry/fixture/actions/permissions/fork-pr-contributor-approval') printf '%s' '{\"approval_policy\":\"first_time_contributors\"}' ;;\n  'PUT repos/socketry/fixture/actions/permissions/fork-pr-contributor-approval') cat >/dev/null ;;\n  'PATCH repos/socketry/fixture') cat >/dev/null; printf '%s' '{}' ;;\n  *) echo unexpected-request >&2; exit 1 ;;\nesac\n",
         );
         let mut context = project.context();
         let result = setup::github::apply(

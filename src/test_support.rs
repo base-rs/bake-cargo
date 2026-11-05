@@ -73,6 +73,22 @@ impl Project {
     pub fn cargo_arguments(&self) -> String {
         fs::read_to_string(self.root().join("cargo-arguments.log")).unwrap_or_default()
     }
+
+    /// Put a `git` ahead on `PATH` that fails for one subcommand and otherwise runs the real git.
+    pub fn git_proxy(&self, environment: &mut Environment, fail: Option<&str>) -> PathBuf {
+        let real_git = std::env::split_paths(&environment.original("PATH").unwrap_or_default())
+            .map(|directory| directory.join("git"))
+            .find(|candidate| candidate.is_file())
+            .expect("git is installed");
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"$BAKE_TEST_GIT_FAILURE\" ]; then echo 'fake git failure' >&2; exit 7; fi\nexec {} \"$@\"\n",
+            shell_quote(&real_git)
+        );
+        let path = self.executable("git", &script);
+        environment.set("BAKE_TEST_GIT_FAILURE", fail.unwrap_or(""));
+        environment.prepend_path(&self.root().join("bin"));
+        path
+    }
 }
 
 fn cargo_path(value: Option<OsString>) -> PathBuf {

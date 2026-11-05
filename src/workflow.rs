@@ -62,7 +62,7 @@ pub fn detect_release(context: &mut Context, base: String, sha: String) -> Resul
     append_release_outputs(true, &version, append_github_output)
 }
 
-fn release_trailer(context: &Context, sha: &str) -> Result<Option<String>> {
+pub(crate) fn release_trailer(context: &Context, sha: &str) -> Result<Option<String>> {
     // Inspect exactly this commit, never an ancestor or a matching line in prose.
     // `format:` avoids adding a newline: no trailer and an empty trailer stay distinct.
     let output = context
@@ -190,7 +190,7 @@ fn publication_state(
     Ok((pending, published))
 }
 
-fn previous_versions(context: &Context, base: &str) -> Result<Option<String>> {
+pub(crate) fn previous_versions(context: &Context, base: &str) -> Result<Option<String>> {
     if base.is_empty() || base.bytes().all(|byte| byte == b'0') {
         return Ok(None);
     }
@@ -351,7 +351,7 @@ fn run_git(context: &Context, arguments: &[String]) -> Result<()> {
     }
 }
 
-fn append_github_output(name: &str, value: &str) -> Result<()> {
+pub(crate) fn append_github_output(name: &str, value: &str) -> Result<()> {
     let Some(path) = std::env::var_os("GITHUB_OUTPUT") else {
         return Ok(());
     };

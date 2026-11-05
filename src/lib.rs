@@ -6,6 +6,7 @@
 //! The crate name supplies the `cargo` task namespace. Nested modules group
 //! setup, trusted-publishing, and version operations; the crate also provides a
 //! GitHub release task using `releases.md`.
+pub mod artifacts;
 #[path = "cargo.rs"]
 mod cargo_support;
 mod crates_io;
@@ -117,7 +118,49 @@ pub mod setup {
             return Err(Error::new("the workspace has no publishable packages"));
         }
         github_helpers::validate_branch(&branch)?;
-        if PathBuf::from(&filename).components().count() != 1
+        validate_workflow_filename(&filename)?;
+
+        let contents = cargo_helpers::publish_workflow(&packages, &branch)?;
+        let (path, written) = write_workflow(context, &filename, &contents, force)?;
+        Ok(if written {
+            format!(
+                "Generated {} for {} package(s)",
+                path.display(),
+                packages.len()
+            )
+        } else {
+            format!("{} already matches the generated workflow", path.display())
+        })
+    }
+
+    /// Write `.github/workflows/release-artifacts.yml`, which builds, signs, verifies, and attaches release artifacts after each release.
+    ///
+    /// The project supplies executable `scripts/release-artifacts/build`, `sign`, and `verify` scripts. `--secrets NAME` (repeatable) names the `--environment` secrets that only the sign step receives, as files in `$RELEASE_SECRETS`.
+    #[bake::task]
+    pub fn artifacts(
+        context: &mut Context,
+        #[bake(default = "release-artifacts.yml")] filename: String,
+        #[bake(default = "main")] branch: String,
+        #[bake(default = "release-artifacts")] environment: String,
+        secrets: Vec<String>,
+        #[bake(default = false)] force: bool,
+    ) -> Result<String> {
+        validate_workflow_filename(&filename)?;
+        let contents =
+            crate::artifacts::release_artifacts_workflow(&branch, &environment, &secrets)?;
+        let (path, written) = write_workflow(context, &filename, &contents, force)?;
+        Ok(if written {
+            format!(
+                "Generated {}; add executable scripts/release-artifacts/build, sign, and verify",
+                path.display()
+            )
+        } else {
+            format!("{} already matches the generated workflow", path.display())
+        })
+    }
+
+    fn validate_workflow_filename(filename: &str) -> Result<()> {
+        if PathBuf::from(filename).components().count() != 1
             || filename.is_empty()
             || !filename.ends_with(".yml") && !filename.ends_with(".yaml")
         {
@@ -125,8 +168,16 @@ pub mod setup {
                 "workflow filename must be a single .yml or .yaml filename",
             ));
         }
+        Ok(())
+    }
 
-        let contents = cargo_helpers::publish_workflow(&packages, &branch)?;
+    /// Write a generated workflow, refusing to replace a different file unless `force` is set. Returns the path and whether it was written.
+    fn write_workflow(
+        context: &Context,
+        filename: &str,
+        contents: &str,
+        force: bool,
+    ) -> Result<(PathBuf, bool)> {
         let workflow_directory = context.root().join(".github").join("workflows");
         fs::create_dir_all(&workflow_directory)?;
         let path = workflow_directory.join(filename);
@@ -134,10 +185,7 @@ pub mod setup {
         if path.exists() {
             let existing = fs::read_to_string(&path)?;
             if existing == contents {
-                return Ok(format!(
-                    "{} already matches the generated workflow",
-                    path.display()
-                ));
+                return Ok((path, false));
             }
             if !force {
                 return Err(Error::new(format!(
@@ -148,11 +196,7 @@ pub mod setup {
         }
 
         fs::write(&path, contents)?;
-        Ok(format!(
-            "Generated {} for {} package(s)",
-            path.display(),
-            packages.len()
-        ))
+        Ok((path, true))
     }
 
     /// GitHub repository ruleset and environment setup tasks.
@@ -588,6 +632,60 @@ mod task_tests {
                 &mut context,
                 "other.yml".to_owned(),
                 "feature/release".to_owned(),
+                false
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn creates_the_release_artifacts_workflow_then_preserves_or_replaces_it() {
+        let project = project();
+        let mut context = project.context();
+        let artifacts = |context: &mut Context, filename: &str, branch: &str, force: bool| {
+            setup::artifacts(
+                context,
+                filename.to_owned(),
+                branch.to_owned(),
+                "android-release".to_owned(),
+                vec!["KEYSTORE".to_owned()],
+                force,
+            )
+        };
+
+        let generated = artifacts(&mut context, "release-artifacts.yml", "main", false).unwrap();
+        assert!(generated.contains("scripts/release-artifacts/build, sign, and verify"));
+        let path = project
+            .root()
+            .join(".github/workflows/release-artifacts.yml");
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("RELEASE_SECRET_KEYSTORE: ${{ secrets.KEYSTORE }}"));
+        assert!(
+            artifacts(&mut context, "release-artifacts.yml", "main", false)
+                .unwrap()
+                .contains("already matches")
+        );
+
+        std::fs::write(&path, "owner content\n").unwrap();
+        assert!(
+            artifacts(&mut context, "release-artifacts.yml", "main", false)
+                .unwrap_err()
+                .to_string()
+                .contains("--force true")
+        );
+        artifacts(&mut context, "release-artifacts.yml", "main", true).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), contents);
+
+        assert!(artifacts(&mut context, "../artifacts.yml", "main", false).is_err());
+        assert!(artifacts(&mut context, "other.yml", "feature/release", false).is_err());
+
+        let blocked = Project::new();
+        blocked.write(".github", "not a directory");
+        assert!(
+            artifacts(
+                &mut blocked.context(),
+                "release-artifacts.yml",
+                "main",
                 false
             )
             .is_err()

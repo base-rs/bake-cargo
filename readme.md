@@ -101,6 +101,27 @@ The plan lists reviewer teams without access under `reviewers.missing_repository
 
 If `--repository owner/name` is omitted, the GitHub repository is inferred from the `origin` Git remote. `--checks` is repeatable and should match status check names already reported by GitHub. When `--wait-timer` is omitted, the existing environment wait timer is left unchanged. At least one reviewer is required, and the selected list replaces the environment's current reviewer list. Both tasks use the authenticated `gh` CLI to resolve reviewer names. The apply task also needs permission to manage repository rulesets and environments. It creates or updates the two rulesets managed by this package and configures the named environment's wait timer, reviewer list, and deployment branch policy. An environment that deploys from all branches is restricted to the `--branch` branch protected by the managed ruleset, so only merged changes can publish; an existing branch policy is kept. The task uses a named branch policy rather than GitHub's protected-branches option, which does not recognize branches protected only by rulesets. The apply task also requires maintainer approval before running workflows for first-time contributors' fork pull requests, keeping a stricter existing policy that requires approval for all external contributors, and sets the repository's squash merge commit title and message to the pull request title and body so release trailers survive squash merges. Existing managed rulesets are replaced with the reviewed desired settings; unrelated rulesets are left alone. The release tag ruleset blocks deleting or moving a release tag, with no bypass, so a published tag always names the commit that was released. It does not restrict creating tags, because the publish workflow pushes the tag with its `GITHUB_TOKEN`; `cargo:release:publish` refuses a tag that already exists at a different commit. A mistaken tag can only be removed by an administrator disabling the ruleset deliberately. When `--checks` is omitted, the ruleset requires the publishing workflow's `check` job and the testing workflow's stable `test-result` aggregate job. Configure at least one required reviewer on the `crates-io` environment to require approval before publishing. The setup allows the workflow initiator to approve their own deployment, so a maintainer releases with one approval click rather than a bypass. GitHub administrators can bypass environment rules by default. To make approval mandatory for administrators too, disable that bypass in the environment's GitHub settings. Tag pushes do not trigger publication.
 
+## Release artifacts
+
+A project that ships files besides its crates, such as an application package, attaches them to each GitHub Release with a second workflow. Generate it after reviewing any existing file, naming the environment that holds the signing secrets and the secrets the sign step needs:
+
+```sh
+cargo bake cargo:setup:artifacts \
+  --environment android-release \
+  --secrets ANDROID_RELEASE_KEYSTORE \
+  --secrets ANDROID_RELEASE_KEYSTORE_PASSWORD
+```
+
+`.github/workflows/release-artifacts.yml` runs after each successful publish workflow run for a push to the release branch, and by hand from the release branch, given the tag of an existing release. The project supplies three executable scripts and no workflow logic. Each runs from a checkout of the release commit with `RELEASE_TAG`, `RELEASE_VERSION`, `RELEASE_SHA`, and `RELEASE_ARTIFACTS` set:
+
+- `scripts/release-artifacts/build` writes unsigned files to the `$RELEASE_ARTIFACTS` directory, with a read-only token and no secrets.
+- `scripts/release-artifacts/sign` signs them in place, on a fresh runner in the `--environment` environment. Only this step receives the `--secrets`, each as a `0600` file named after the secret in the `$RELEASE_SECRETS` directory, which is removed afterwards whether or not signing succeeds. Use a script that does nothing when no signing is needed.
+- `scripts/release-artifacts/verify` checks the signed files. It must fail when any check fails, including when a tool it runs fails.
+
+The workflow supplies the release checks. `cargo:release:artifacts:detect` runs from the release branch, never from the commit it checks, and accepts a tag only when it names a commit on `origin/BRANCH` whose `Release:` trailer requests that tag and whose workspace version matches it. The build and sign jobs check out that commit by its SHA, not by the tag. The final job runs no project code: it checks that the tag still names the commit and uploads every file in `$RELEASE_ARTIFACTS` to the GitHub Release, failing rather than replacing an existing asset, so delete an asset before rebuilding it.
+
+Protect the signing environment like `crates-io`: `cargo bake cargo:setup:github:apply --environment NAME` restricts it to the release branch, which keeps runs from other branches away from its secrets, and sets its reviewers. Add the secrets with `gh secret set SECRET --env NAME`. Maintainers may approve their own deployments, so the protection rests on the release branch, the immutable release commit, and verification rather than on a second person. `--branch`, `--filename`, and `--force` work as for `cargo:setup:workflow`.
+
 ## Trusted publishing
 
 After a package has been published once, crates.io allows its owners to register a GitHub Actions trusted publisher. Preview and apply the configuration with:

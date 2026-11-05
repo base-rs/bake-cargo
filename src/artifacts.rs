@@ -3,7 +3,6 @@
 
 //! Release artifacts: project-specific files built, signed, and verified from
 //! a release commit and attached to its GitHub Release.
-
 use bake::{Context, Error, Result, Value};
 use serde_json::json;
 use std::collections::BTreeSet;

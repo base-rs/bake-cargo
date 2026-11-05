@@ -137,12 +137,17 @@ pub(crate) fn validate_setup(
             "environment wait timer must be between zero and 43,200 minutes",
         ));
     }
-    if environment.is_empty() || !valid_repository_part(environment) {
-        return Err(Error::new(
+    validate_environment(environment)
+}
+
+pub(crate) fn validate_environment(environment: &str) -> Result<()> {
+    if valid_repository_part(environment) {
+        Ok(())
+    } else {
+        Err(Error::new(
             "environment must contain only letters, numbers, dots, underscores, or hyphens",
-        ));
+        ))
     }
-    Ok(())
 }
 
 fn parse_reviewer(value: &str) -> Result<(&str, u64)> {
@@ -398,7 +403,8 @@ fn tag_ruleset(prefix: &str) -> JsonValue {
     // because the publish workflow pushes the tag with its `GITHUB_TOKEN`,
     // which a ruleset cannot reliably name as a bypass actor. A tag created
     // early at another commit is never published over: `cargo:release:publish`
-    // refuses a tag at a different commit.
+    // refuses a tag at a different commit, and `cargo:release:artifacts:detect`
+    // only accepts a tag at a release commit on the release branch.
     json!({
         "name": "Socketry Cargo release tags",
         "target": "tag",

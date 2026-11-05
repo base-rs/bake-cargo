@@ -143,6 +143,12 @@ Prepare a release with `cargo bake cargo:release:patch` (or `minor`, `major`, or
 
 See [releases.md](releases.md) for the full release history.
 
+### v0.7.0
+
+- Add `cargo:release:patch`, `cargo:release:minor`, `cargo:release:major`, and `cargo:release:bump --version X.Y.Z`, which from a clean checkout of the release branch create a `release-{tag}` branch, bump the version, commit with the `Release: {tag}` trailer, validate the candidate, push, and open the release pull request with the release notes and trailer as its body.
+- Remove the `cargo:version:patch`, `cargo:version:minor`, `cargo:version:major`, and `cargo:version:bump` tasks. The `cargo:release:*` tasks perform the same version update and run the `cargo:after_version_bump` hook, so a release is one command followed by review and merge.
+- Set the repository's squash merge commit title and message to the pull request title and body in `cargo:setup:github:apply`, and show the setting in `cargo:setup:github:plan`, so the release trailer survives a squash merge with review fix-ups.
+
 ### v0.6.1
 
 - Fail `cargo:setup:github:apply` before changing anything when a reviewer team cannot access the repository, printing the command that grants access, and list such teams in `cargo:setup:github:plan`. After saving the environment, read it back and fail when GitHub has silently dropped a requested reviewer.
@@ -152,11 +158,6 @@ See [releases.md](releases.md) for the full release history.
 - Require no pull request approvals by default in `cargo:setup:github`, so maintainers merge their own pull requests once checks pass. Pass `--approvals N` to require independent review.
 - Restrict a publishing environment that deploys from all branches to the protected release branch, keeping existing branch policies.
 - Require approval before running workflows for first-time contributors' fork pull requests, keeping a stricter existing policy.
-
-### v0.5.4
-
-- Depend on `base-markdown` under the `base-rs` organization, replacing `core-markdown`.
-- Require migrated Bake License and Bake Releases dependencies.
 
 <!-- bake-readme:releases:end -->
 

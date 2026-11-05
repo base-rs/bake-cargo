@@ -392,12 +392,19 @@ fn tag_ruleset(prefix: &str) -> JsonValue {
     if prefix != "v" {
         patterns.push(format!("refs/tags/{prefix}*"));
     }
+    // A release tag names the commit that was published, and release
+    // artifacts are built from it, so nobody may delete or move one: there
+    // are no bypass actors, administrators included. Creation stays open
+    // because the publish workflow pushes the tag with its `GITHUB_TOKEN`,
+    // which a ruleset cannot reliably name as a bypass actor. A tag created
+    // early at another commit is never published over: `cargo:release:publish`
+    // refuses a tag at a different commit.
     json!({
         "name": "Socketry Cargo release tags",
         "target": "tag",
         "enforcement": "active",
         "conditions": {"ref_name": {"include": patterns, "exclude": []}},
-        "rules": [{"type": "deletion"}],
+        "rules": [{"type": "deletion"}, {"type": "update"}],
         "bypass_actors": [],
     })
 }
@@ -1839,10 +1846,16 @@ esac
                 "bypass_mode": "pull_request",
             }])
         );
+        let tag = tag_ruleset("v");
         assert_eq!(
-            tag_ruleset("v")["conditions"]["ref_name"]["include"][0],
-            "refs/tags/v*"
+            tag["conditions"]["ref_name"]["include"],
+            json!(["refs/tags/v*"])
         );
+        assert_eq!(
+            tag["rules"],
+            json!([{"type": "deletion"}, {"type": "update"}])
+        );
+        assert_eq!(tag["bypass_actors"], json!([]));
     }
 
     #[test]

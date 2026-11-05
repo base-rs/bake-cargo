@@ -341,6 +341,7 @@ pub(crate) fn setup_plan(
         },
         "environment": environment_settings,
         "fork_pr_contributor_approval": {"approval_policy": fork_approval_policy(None)},
+        "merge_settings": merge_settings(),
         "preservation": "Existing environment settings are preserved unless overridden above. An environment that deploys from all branches is restricted to the deployment branches above; an existing branch policy is kept. An existing all_external_contributors fork approval policy is preserved.",
         "apply": "cargo:setup:github:apply",
     })
@@ -512,6 +513,24 @@ fn fork_approval_policy(existing: Option<&str>) -> &'static str {
 const FIRST_TIME_CONTRIBUTORS: &str = "first_time_contributors";
 const ALL_EXTERNAL_CONTRIBUTORS: &str = "all_external_contributors";
 
+// A squash merge built from concatenated commit messages buries the
+// `Release:` trailer of a release pull request under later review commits,
+// where Git no longer parses it. Taking the title and body from the pull
+// request keeps the trailer at the end of the merged commit message.
+fn merge_settings() -> JsonValue {
+    json!({
+        "squash_merge_commit_title": "PR_TITLE",
+        "squash_merge_commit_message": "PR_BODY",
+    })
+}
+
+fn apply_merge_settings(context: &Context, repository: &Repository) -> Result<JsonValue> {
+    let path = format!("repos/{}", repository.full_name());
+    let body = merge_settings();
+    github_api(context, "PATCH", &path, Some(&body))?;
+    Ok(body)
+}
+
 fn apply_fork_approval(context: &Context, repository: &Repository) -> Result<JsonValue> {
     let path = format!(
         "repos/{}/actions/permissions/fork-pr-contributor-approval",
@@ -594,6 +613,7 @@ pub(crate) fn apply_setup(
         JsonValue::Null
     };
     let fork_approval_result = apply_fork_approval(context, repository)?;
+    let merge_settings_result = apply_merge_settings(context, repository)?;
     verify_environment_reviewers(
         context,
         repository,
@@ -609,6 +629,7 @@ pub(crate) fn apply_setup(
         "environment": environment_result,
         "deployment_branch": deployment_branch,
         "fork_pr_contributor_approval": fork_approval_result,
+        "merge_settings": merge_settings_result,
     }))
 }
 
@@ -1441,6 +1462,10 @@ mod tests {
             plan["fork_pr_contributor_approval"]["approval_policy"],
             "first_time_contributors"
         );
+        assert_eq!(
+            plan["merge_settings"]["squash_merge_commit_message"],
+            "PR_BODY"
+        );
     }
 
     #[test]
@@ -1459,7 +1484,7 @@ mod tests {
         with_fake_gh(
             &project,
             &mut environment,
-            "#!/bin/sh\ncase \"$3 $4\" in\n  'GET repos/socketry/example/environments?per_page=100') printf '%s' '{\"environments\":[]}' ;;\n  'GET repos/socketry/example/rulesets?per_page=100') printf '%s' '[]' ;;\n  'POST repos/socketry/example/rulesets') cat >/dev/null; printf '%s' '{\"created\":true}' ;;\n  'PUT repos/socketry/example/environments/crates-io') cat > requested-environment.json; printf '%s' '{\"name\":\"crates-io\"}' ;;\n  'GET repos/socketry/example/environments/crates-io') printf '%s' '{\"protection_rules\":[{\"type\":\"required_reviewers\",\"reviewers\":[{\"type\":\"User\",\"reviewer\":{\"id\":123}}]}]}' ;;\n  'GET repos/socketry/example/environments/crates-io/deployment-branch-policies?per_page=100') printf '%s' '{\"branch_policies\":[]}' ;;\n  'POST repos/socketry/example/environments/crates-io/deployment-branch-policies') cat > requested-deployment-branch.json; printf '%s' '{\"name\":\"main\",\"type\":\"branch\"}' ;;\n  'GET repos/socketry/example/actions/permissions/fork-pr-contributor-approval') printf '%s' '{\"approval_policy\":\"first_time_contributors\"}' ;;\n  'PUT repos/socketry/example/actions/permissions/fork-pr-contributor-approval') cat > requested-fork-approval.json ;;\n  *) echo unexpected-request >&2; exit 1 ;;\nesac\n",
+            "#!/bin/sh\ncase \"$3 $4\" in\n  'GET repos/socketry/example/environments?per_page=100') printf '%s' '{\"environments\":[]}' ;;\n  'GET repos/socketry/example/rulesets?per_page=100') printf '%s' '[]' ;;\n  'POST repos/socketry/example/rulesets') cat >/dev/null; printf '%s' '{\"created\":true}' ;;\n  'PUT repos/socketry/example/environments/crates-io') cat > requested-environment.json; printf '%s' '{\"name\":\"crates-io\"}' ;;\n  'GET repos/socketry/example/environments/crates-io') printf '%s' '{\"protection_rules\":[{\"type\":\"required_reviewers\",\"reviewers\":[{\"type\":\"User\",\"reviewer\":{\"id\":123}}]}]}' ;;\n  'GET repos/socketry/example/environments/crates-io/deployment-branch-policies?per_page=100') printf '%s' '{\"branch_policies\":[]}' ;;\n  'POST repos/socketry/example/environments/crates-io/deployment-branch-policies') cat > requested-deployment-branch.json; printf '%s' '{\"name\":\"main\",\"type\":\"branch\"}' ;;\n  'GET repos/socketry/example/actions/permissions/fork-pr-contributor-approval') printf '%s' '{\"approval_policy\":\"first_time_contributors\"}' ;;\n  'PUT repos/socketry/example/actions/permissions/fork-pr-contributor-approval') cat > requested-fork-approval.json ;;\n  'PATCH repos/socketry/example') cat > requested-merge-settings.json; printf '%s' '{\"full_name\":\"socketry/example\"}' ;;\n  *) echo unexpected-request >&2; exit 1 ;;\nesac\n",
         );
         let repository = Repository {
             owner: "socketry".to_owned(),
@@ -1508,6 +1533,15 @@ mod tests {
             fork_approval_body,
             json!({"approval_policy": "first_time_contributors"})
         );
+        let merge_settings_body: JsonValue = serde_json::from_slice(
+            &std::fs::read(project.root().join("requested-merge-settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            merge_settings_body,
+            json!({"squash_merge_commit_title": "PR_TITLE", "squash_merge_commit_message": "PR_BODY"})
+        );
+        assert_eq!(result["merge_settings"], merge_settings_body);
     }
 
     #[test]
@@ -1549,6 +1583,10 @@ case "$3 $4" in
   'PUT repos/socketry/example/actions/permissions/fork-pr-contributor-approval')
     cat >/dev/null
     if [ "$BAKE_TEST_SETUP_FAILURE" = fork-approval-update ]; then echo 'injected failure' >&2; exit 1; fi ;;
+  'PATCH repos/socketry/example')
+    cat >/dev/null
+    if [ "$BAKE_TEST_SETUP_FAILURE" = merge-settings ]; then echo 'injected failure' >&2; exit 1; fi
+    printf '%s' '{}' ;;
   *) echo unexpected-request >&2; exit 1 ;;
 esac
 "#;
@@ -1568,6 +1606,7 @@ esac
             "deployment-branch-create",
             "fork-approval-read",
             "fork-approval-update",
+            "merge-settings",
             "environment-read-back",
         ] {
             let _ = std::fs::remove_file(&gets_file);
@@ -1628,7 +1667,7 @@ esac
         with_fake_gh(
             &project,
             &mut environment,
-            "#!/bin/sh\ncase \"$3 $4\" in\n  'GET repos/socketry/example/environments?per_page=100') printf '%s' '{\"environments\":[{\"name\":\"crates-io\"}]}' ;;\n  'GET repos/socketry/example/environments/crates-io') printf '%s' '{\"protection_rules\":[{\"type\":\"wait_timer\",\"wait_timer\":5},{\"type\":\"required_reviewers\",\"prevent_self_review\":true,\"reviewers\":[{\"type\":\"User\",\"reviewer\":{\"id\":77}}]}],\"deployment_branch_policy\":{\"protected_branches\":true}}' ;;\n  'GET repos/socketry/example/rulesets?per_page=100') printf '%s' '[{\"name\":\"Socketry Cargo checks\",\"id\":42},{\"name\":\"Socketry Cargo release tags\",\"id\":43}]' ;;\n  'PUT repos/socketry/example/rulesets/42'|'PUT repos/socketry/example/rulesets/43') cat >/dev/null; printf '%s' '{\"updated\":true}' ;;\n  'PUT repos/socketry/example/environments/crates-io') cat > requested-environment.json; printf '%s' '{}' ;;\n  'GET repos/socketry/example/actions/permissions/fork-pr-contributor-approval') printf '%s' '{\"approval_policy\":\"all_external_contributors\"}' ;;\n  'PUT repos/socketry/example/actions/permissions/fork-pr-contributor-approval') cat > requested-fork-approval.json ;;\n  *) echo unexpected-request >&2; exit 1 ;;\nesac\n",
+            "#!/bin/sh\ncase \"$3 $4\" in\n  'GET repos/socketry/example/environments?per_page=100') printf '%s' '{\"environments\":[{\"name\":\"crates-io\"}]}' ;;\n  'GET repos/socketry/example/environments/crates-io') printf '%s' '{\"protection_rules\":[{\"type\":\"wait_timer\",\"wait_timer\":5},{\"type\":\"required_reviewers\",\"prevent_self_review\":true,\"reviewers\":[{\"type\":\"User\",\"reviewer\":{\"id\":77}}]}],\"deployment_branch_policy\":{\"protected_branches\":true}}' ;;\n  'GET repos/socketry/example/rulesets?per_page=100') printf '%s' '[{\"name\":\"Socketry Cargo checks\",\"id\":42},{\"name\":\"Socketry Cargo release tags\",\"id\":43}]' ;;\n  'PUT repos/socketry/example/rulesets/42'|'PUT repos/socketry/example/rulesets/43') cat >/dev/null; printf '%s' '{\"updated\":true}' ;;\n  'PUT repos/socketry/example/environments/crates-io') cat > requested-environment.json; printf '%s' '{}' ;;\n  'GET repos/socketry/example/actions/permissions/fork-pr-contributor-approval') printf '%s' '{\"approval_policy\":\"all_external_contributors\"}' ;;\n  'PUT repos/socketry/example/actions/permissions/fork-pr-contributor-approval') cat > requested-fork-approval.json ;;\n  'PATCH repos/socketry/example') cat >/dev/null; printf '%s' '{}' ;;\n  *) echo unexpected-request >&2; exit 1 ;;\nesac\n",
         );
         let repository = Repository {
             owner: "socketry".to_owned(),
@@ -2006,6 +2045,7 @@ case "$3 $4" in
   'POST repos/socketry/example/environments/crates-io/deployment-branch-policies') cat >/dev/null; printf '%s' '{}' ;;
   'GET repos/socketry/example/actions/permissions/fork-pr-contributor-approval') printf '%s' '{}' ;;
   'PUT repos/socketry/example/actions/permissions/fork-pr-contributor-approval') cat >/dev/null ;;
+  'PATCH repos/socketry/example') cat >/dev/null; printf '%s' '{}' ;;
   *) echo unexpected-request >&2; exit 1 ;;
 esac
 "#,

@@ -21,7 +21,15 @@ Workspace discovery uses `cargo metadata --no-deps` and ignores packages marked 
 
 ## Versioning and releases
 
-The `cargo:version:patch`, `cargo:version:minor`, and `cargo:version:major` tasks update the shared stable version of all publishable packages in the workspace. `cargo:version:bump --version X.Y.Z` sets an explicit higher version. These tasks preserve TOML formatting, update version requirements for in-workspace dependencies, and refresh `Cargo.lock`. After the update, they optionally call a project task named `cargo:after_version_bump`, passing the new version. If that task is absent, the version bump completes without a hook. A project can use the hook to run `license:update`, update `releases.md`, or perform other project-specific work:
+A release starts with one task from a clean checkout of the release branch (`--branch`, default `main`):
+
+```bash
+cargo bake cargo:release:patch
+```
+
+`cargo:release:minor` and `cargo:release:major` increment the other components, and `cargo:release:bump --version X.Y.Z` sets an explicit higher version. The task creates a `release-{tag}` branch, updates the shared stable version of all publishable packages in the workspace (preserving TOML formatting, updating version requirements for in-workspace dependencies, and refreshing `Cargo.lock`), and calls the project task named `cargo:after_version_bump` with the new version when one is registered. It then commits the result with the `Release: {tag}` trailer, validates and packages the committed candidate with `cargo:release`, pushes the branch, and opens a pull request with `gh` whose body is the release notes followed by the same trailer. The task refuses to start from a tree with uncommitted tracked changes or from another branch, and when validation fails after the commit it leaves the release branch in place for inspection. It never tags or publishes; review and merge the pull request, then approve the publishing environment deployment.
+
+A project uses the `cargo:after_version_bump` hook to run `license:update`, update `releases.md`, or perform other project-specific work:
 
 ```rust,ignore
 #[bake::task(name = "cargo:after_version_bump")]
@@ -33,13 +41,9 @@ fn after_version_bump(context: &mut bake::Context, version: String) -> bake::Res
 }
 ```
 
-Projects using `base-project` get a standard hook that updates the license, release notes, and generated Readme sections.
+Projects using `base-project` get a standard hook that updates the license, release notes, and generated Readme sections. Review the release commit before merging the pull request; `releases.md` must contain a heading for the new tag, which the hook creates from the `## Unreleased` section.
 
-Review the changes made by the hook before committing the release.
-
-The `cargo:release:patch`, `cargo:release:minor`, and `cargo:release:major` tasks, and `cargo:release:bump --version X.Y.Z`, perform the whole local release sequence from a clean checkout of the release branch (`--branch`, default `main`): they create a `release-{tag}` branch, run the matching version task and its hook, commit the result with the `Release: {tag}` trailer, validate and package the committed candidate with `cargo:release`, push the branch, and open a pull request with `gh` whose body is the release notes followed by the same trailer. They stop there; review and merge the pull request as described below. When validation fails after the commit, the release branch is left in place for inspection.
-
-To perform the steps by hand instead, update the shared version and add the matching release-notes heading, then commit the version, release notes, and any other release changes. Run `cargo:release` to validate and package the committed release candidate. It does not create a tag or publish anything. Include exactly one Git trailer naming the intended tag in the final release commit:
+The release commit carries exactly one Git trailer naming the intended tag:
 
 ```text
 Bump patch version.
@@ -47,7 +51,9 @@ Bump patch version.
 Release: v0.5.0
 ```
 
-By default, the tag is `v` followed by the exact Cargo workspace version. Set `tag-prefix` in `[workspace.metadata.bake.release]` (or `[package.metadata.bake.release]` for a single package) to use a different prefix. For example, `tag-prefix = "base-v"` produces `base-v0.1.0`. Use the same full tag in the release-notes heading and the `Release:` trailer. Prefixes may contain ASCII letters, numbers, hyphens, and underscores, and must not start with a hyphen; an empty prefix is supported. Keep the trailer on the latest commit of the release pull request, including after review fixes. Open a pull request for review. When squash merging, the trailer must end up at the end of the resulting commit message: `cargo:setup:github:apply` configures the repository to build squash commits from the pull request title and body, so a pull request whose body ends with the trailer (as the `cargo:release:*` tasks create) merges correctly from the GitHub UI or `gh pr merge --squash`. Without that setting, GitHub concatenates the commit messages and a review fix-up buries the trailer; pass a body file containing the trailer to `gh pr merge --squash --body-file` instead. Rebase merging preserves the individual commit messages; the final commit must carry the trailer. A missing trailer means no release, even when the version changed.
+By default, the tag is `v` followed by the exact Cargo workspace version. Set `tag-prefix` in `[workspace.metadata.bake.release]` (or `[package.metadata.bake.release]` for a single package) to use a different prefix. For example, `tag-prefix = "base-v"` produces `base-v0.1.0`. Prefixes may contain ASCII letters, numbers, hyphens, and underscores, and must not start with a hyphen; an empty prefix is supported. The release-notes heading, the trailer, and the pull request body all use the same full tag.
+
+The trailer must end the final merged commit message; a missing trailer means no release, even when the version changed. `cargo:setup:github:apply` configures the repository to build squash commits from the pull request title and body, so a release pull request merges correctly from the GitHub UI or `gh pr merge --squash` regardless of review fix-up commits. Without that setting, GitHub concatenates the commit messages and a fix-up buries the trailer; pass a body file containing the trailer to `gh pr merge --squash --body-file` instead. Rebase merging preserves the individual commit messages, so the last commit must carry the trailer. The publish workflow runs `cargo:release` on every candidate to validate and package the committed tree.
 
 ## GitHub workflow and repository settings
 
@@ -125,7 +131,7 @@ cargo bake cargo:releases:github:release vX.Y.Z --draft true
 
 The task uses the authenticated `gh` CLI. Omit `--draft true` to publish the release immediately.
 
-The Cargo release integration supports crates.io and GitHub Actions. The version tasks edit Cargo package version fields and local dependency requirements without committing; the `cargo:release:*` bump tasks commit, push, and open a pull request, but never tag or publish. The GitHub release task publishes a GitHub Release explicitly. The setup task only manages its named repository rulesets, and GitHub may require repository or organization plan features for some settings.
+The Cargo release integration supports crates.io and GitHub Actions. The `cargo:release:*` tasks edit Cargo package version fields and local dependency requirements, commit, push, and open a pull request, but never tag or publish. The GitHub release task publishes a GitHub Release explicitly. The setup task only manages its named repository rulesets, and GitHub may require repository or organization plan features for some settings.
 
 ## Releasing
 

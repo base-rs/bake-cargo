@@ -85,46 +85,54 @@ fn executable_runs_release_tasks_in_a_temporary_project() {
             )
             .unwrap();
 
-            let status = Command::new("git")
+            let status = Command::new("cargo")
                 .current_dir(&root)
-                .args(["init", "--quiet"])
+                .args(["generate-lockfile", "--quiet", "--offline"])
                 .status()
                 .unwrap();
             assert!(status.success());
-            let status = Command::new("git")
-                .current_dir(&root)
-                .args([
+            let project = Self(root);
+            for arguments in [
+                &["init", "--quiet", "--initial-branch=main"][..],
+                &["config", "user.name", "Test User"],
+                &["config", "user.email", "test@example.com"],
+                &[
                     "remote",
                     "add",
                     "origin",
                     "https://github.com/socketry/fixture.git",
-                ])
-                .status()
-                .unwrap();
-            assert!(status.success());
-            let status = Command::new("git")
-                .current_dir(&root)
-                .args(["add", "."])
-                .status()
-                .unwrap();
-            assert!(status.success());
-            let status = Command::new("git")
-                .current_dir(&root)
-                .args([
-                    "-c",
-                    "user.name=Test User",
-                    "-c",
-                    "user.email=test@example.com",
-                    "commit",
-                    "--quiet",
-                    "-m",
-                    "Initial fixture",
-                ])
-                .status()
-                .unwrap();
-            assert!(status.success());
+                ],
+                &["add", "."],
+                &["commit", "--quiet", "-m", "Initial fixture"],
+            ] {
+                project.git(arguments);
+            }
 
-            Self(root)
+            project
+        }
+
+        fn git(&self, arguments: &[&str]) -> String {
+            let output = Command::new("git")
+                .current_dir(&self.0)
+                .args(arguments)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {arguments:?} failed");
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        }
+
+        /// Point `origin` at a local bare repository so release tasks can push.
+        fn local_origin(&self) -> PathBuf {
+            let origin = self.sibling("origin");
+            fs::create_dir_all(&origin).unwrap();
+            let status = Command::new("git")
+                .current_dir(&origin)
+                .args(["init", "--quiet", "--bare"])
+                .status()
+                .unwrap();
+            assert!(status.success());
+            self.git(&["remote", "set-url", "origin", origin.to_str().unwrap()]);
+            origin
         }
 
         fn run(&self, arguments: &[&str]) -> std::process::Output {
@@ -137,13 +145,21 @@ fn executable_runs_release_tasks_in_a_temporary_project() {
                 .unwrap()
         }
 
+        /// A scratch directory beside the checkout, so it never dirties the Git tree.
+        fn sibling(&self, suffix: &str) -> PathBuf {
+            self.0.with_file_name(format!(
+                "{}-{suffix}",
+                self.0.file_name().unwrap().to_string_lossy()
+            ))
+        }
+
         fn run_with_fake_gh(&self, arguments: &[&str]) -> std::process::Output {
-            let bin = self.0.join("bin");
+            let bin = self.sibling("bin");
             fs::create_dir_all(&bin).unwrap();
             let executable = bin.join("gh");
             fs::write(
                 &executable,
-                "#!/bin/sh\nif [ \"$1 $2\" = 'release view' ]; then\n  case \"$3\" in\n    v1.2.4) printf '%s' '{\"tagName\":\"v1.2.4\",\"name\":\"v1.2.4\",\"body\":\"Improvement.\",\"isDraft\":false,\"url\":\"https://github.com/socketry/fixture/releases/tag/v1.2.4\"}'; exit 0 ;;\n    v1.2.5) printf '%s' '{\"tagName\":\"v1.2.5\",\"name\":\"Old title\",\"body\":\"Old notes.\",\"isDraft\":false,\"url\":\"https://github.com/socketry/fixture/releases/tag/v1.2.5\"}'; exit 0 ;;\n  esac\n  echo 'release not found' >&2; exit 1\nfi\nif [ \"$1 $2\" = 'release create' ] || [ \"$1 $2\" = 'release edit' ]; then printf '%s\\n' \"$@\" >gh-arguments.txt; cat >gh-notes.md; echo \"https://github.com/socketry/fixture/releases/tag/$3\"; exit 0; fi\ncase \"$3 $4\" in\n  'GET users/alice') printf '%s' '{\"id\":42}' ;;\n  'GET repos/socketry/fixture/environments?per_page=100') printf '%s' '{\"environments\":[]}' ;;\n  'GET repos/socketry/fixture/rulesets?per_page=100') printf '%s' '[]' ;;\n  'POST repos/socketry/fixture/rulesets') cat >/dev/null; printf '%s' '{\"id\":7}' ;;\n  'PUT repos/socketry/fixture/environments/crates-io') cat >/dev/null; printf '%s' '{\"name\":\"crates-io\"}' ;;\n  'GET repos/socketry/fixture/environments/crates-io') printf '%s' '{\"protection_rules\":[{\"type\":\"required_reviewers\",\"reviewers\":[{\"type\":\"User\",\"reviewer\":{\"id\":42}}]}]}' ;;\n  'GET repos/socketry/fixture/environments/crates-io/deployment-branch-policies?per_page=100') printf '%s' '{\"branch_policies\":[]}' ;;\n  'POST repos/socketry/fixture/environments/crates-io/deployment-branch-policies') cat >/dev/null; printf '%s' '{\"name\":\"main\",\"type\":\"branch\"}' ;;\n  'GET repos/socketry/fixture/actions/permissions/fork-pr-contributor-approval') printf '%s' '{\"approval_policy\":\"first_time_contributors\"}' ;;\n  'PUT repos/socketry/fixture/actions/permissions/fork-pr-contributor-approval') cat >/dev/null ;;\n  'PATCH repos/socketry/fixture') cat >/dev/null; printf '%s' '{}' ;;\n  *) echo unexpected-request >&2; exit 1 ;;\nesac\n",
+                "#!/bin/sh\nif [ \"$1 $2\" = 'release view' ]; then\n  case \"$3\" in\n    v1.2.4) printf '%s' '{\"tagName\":\"v1.2.4\",\"name\":\"v1.2.4\",\"body\":\"Improvement.\",\"isDraft\":false,\"url\":\"https://github.com/socketry/fixture/releases/tag/v1.2.4\"}'; exit 0 ;;\n    v1.2.5) printf '%s' '{\"tagName\":\"v1.2.5\",\"name\":\"Old title\",\"body\":\"Old notes.\",\"isDraft\":false,\"url\":\"https://github.com/socketry/fixture/releases/tag/v1.2.5\"}'; exit 0 ;;\n  esac\n  echo 'release not found' >&2; exit 1\nfi\nif [ \"$1 $2\" = 'pr create' ]; then printf '%s\\n' \"$@\" >gh-pr-arguments.txt; echo https://github.com/socketry/fixture/pull/1; exit 0; fi\nif [ \"$1 $2\" = 'release create' ] || [ \"$1 $2\" = 'release edit' ]; then printf '%s\\n' \"$@\" >gh-arguments.txt; cat >gh-notes.md; echo \"https://github.com/socketry/fixture/releases/tag/$3\"; exit 0; fi\ncase \"$3 $4\" in\n  'GET users/alice') printf '%s' '{\"id\":42}' ;;\n  'GET repos/socketry/fixture/environments?per_page=100') printf '%s' '{\"environments\":[]}' ;;\n  'GET repos/socketry/fixture/rulesets?per_page=100') printf '%s' '[]' ;;\n  'POST repos/socketry/fixture/rulesets') cat >/dev/null; printf '%s' '{\"id\":7}' ;;\n  'PUT repos/socketry/fixture/environments/crates-io') cat >/dev/null; printf '%s' '{\"name\":\"crates-io\"}' ;;\n  'GET repos/socketry/fixture/environments/crates-io') printf '%s' '{\"protection_rules\":[{\"type\":\"required_reviewers\",\"reviewers\":[{\"type\":\"User\",\"reviewer\":{\"id\":42}}]}]}' ;;\n  'GET repos/socketry/fixture/environments/crates-io/deployment-branch-policies?per_page=100') printf '%s' '{\"branch_policies\":[]}' ;;\n  'POST repos/socketry/fixture/environments/crates-io/deployment-branch-policies') cat >/dev/null; printf '%s' '{\"name\":\"main\",\"type\":\"branch\"}' ;;\n  'GET repos/socketry/fixture/actions/permissions/fork-pr-contributor-approval') printf '%s' '{\"approval_policy\":\"first_time_contributors\"}' ;;\n  'PUT repos/socketry/fixture/actions/permissions/fork-pr-contributor-approval') cat >/dev/null ;;\n  'PATCH repos/socketry/fixture') cat >/dev/null; printf '%s' '{}' ;;\n  *) echo unexpected-request >&2; exit 1 ;;\nesac\n",
             )
             .unwrap();
             fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
@@ -165,6 +181,9 @@ fn executable_runs_release_tasks_in_a_temporary_project() {
 
     impl Drop for Project {
         fn drop(&mut self) {
+            for suffix in ["origin", "bin"] {
+                let _ = fs::remove_dir_all(self.sibling(suffix));
+            }
             let _ = fs::remove_dir_all(&self.0);
         }
     }
@@ -283,33 +302,64 @@ fn executable_runs_release_tasks_in_a_temporary_project() {
         String::from_utf8_lossy(&output.stderr)
             .contains("tag must be a nonempty GitHub release tag")
     );
-    assert!(
-        !project
-            .run(&["cargo:version:bump", "--version", "invalid"])
-            .status
-            .success()
-    );
-    assert_success(project.run(&["cargo:version:patch"]), "cargo:version:patch");
-
     assert!(root.join(".github/workflows/publish.yml").is_file());
-    assert!(
-        fs::read_to_string(root.join("Cargo.toml"))
-            .unwrap()
-            .contains("version = \"0.1.1\"")
-    );
 
     for (arguments, expected_version) in [
-        (&["cargo:version:minor"][..], "0.2.0"),
-        (&["cargo:version:major"][..], "1.0.0"),
-        (&["cargo:version:bump", "--version", "1.0.1"][..], "1.0.1"),
+        (&["cargo:release:patch"][..], "0.1.1"),
+        (&["cargo:release:minor"][..], "0.2.0"),
+        (&["cargo:release:major"][..], "1.0.0"),
+        (&["cargo:release:bump", "--version", "1.0.1"][..], "1.0.1"),
     ] {
         let project = Project::new();
         let task = arguments[0];
-        assert_success(project.run(arguments), task);
+        assert!(
+            !project
+                .run(&["cargo:release:bump", "--version", "invalid"])
+                .status
+                .success()
+        );
+        assert_eq!(project.git(&["rev-parse", "--abbrev-ref", "HEAD"]), "main");
+        let origin = project.local_origin();
+        let output = project.run_with_fake_gh(arguments);
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        assert_success(output, task);
+        let tag = format!("v{expected_version}");
+        assert!(
+            stdout.contains("https://github.com/socketry/fixture/pull/1"),
+            "{stdout}"
+        );
         assert!(
             fs::read_to_string(project.0.join("Cargo.toml"))
                 .unwrap()
                 .contains(&format!("version = \"{expected_version}\""))
+        );
+        assert!(
+            fs::read_to_string(project.0.join("releases.md"))
+                .unwrap()
+                .contains(&format!("## {tag}\n"))
+        );
+        assert_eq!(
+            project.git(&["rev-parse", "--abbrev-ref", "HEAD"]),
+            format!("release-{tag}")
+        );
+        assert_eq!(
+            project.git(&["log", "-1", "--format=%(trailers:key=Release,valueonly)"]),
+            tag
+        );
+        assert_eq!(
+            project.git(&["status", "--porcelain", "--untracked-files=no"]),
+            ""
+        );
+        let pushed = Command::new("git")
+            .current_dir(&origin)
+            .args(["rev-parse", &format!("release-{tag}")])
+            .output()
+            .unwrap();
+        assert!(pushed.status.success());
+        let pr_arguments = fs::read_to_string(project.0.join("gh-pr-arguments.txt")).unwrap();
+        assert!(
+            pr_arguments.ends_with(&format!("Release: {tag}\n\n")),
+            "{pr_arguments}"
         );
     }
 }

@@ -164,6 +164,11 @@ Prepare a release with `cargo bake cargo:release:patch` (or `minor`, `major`, or
 
 See [releases.md](releases.md) for the full release history.
 
+### v0.8.0
+
+- Add `cargo:setup:artifacts`, which generates a `release-artifacts.yml` workflow that builds, signs, verifies, and attaches project-specific files to the GitHub Release from the released commit, and `cargo:release:artifacts:detect`, which checks that the commit is on the release branch and matches the tag and version. Projects supply only `scripts/release-artifacts/build`, `sign`, and `verify`; signing secrets reach only the sign step, on a runner that never ran the build.
+- Block updates to release tags, as well as deletion, in the release tag ruleset that `cargo:setup:github:apply` manages, so nobody can move a published tag to another commit.
+
 ### v0.7.0
 
 - Add `cargo:release:patch`, `cargo:release:minor`, `cargo:release:major`, and `cargo:release:bump --version X.Y.Z`, which from a clean checkout of the release branch create a `release-{tag}` branch, bump the version, commit with the `Release: {tag}` trailer, validate the candidate, push, and open the release pull request with the release notes and trailer as its body.
@@ -173,12 +178,6 @@ See [releases.md](releases.md) for the full release history.
 ### v0.6.1
 
 - Fail `cargo:setup:github:apply` before changing anything when a reviewer team cannot access the repository, printing the command that grants access, and list such teams in `cargo:setup:github:plan`. After saving the environment, read it back and fail when GitHub has silently dropped a requested reviewer.
-
-### v0.6.0
-
-- Require no pull request approvals by default in `cargo:setup:github`, so maintainers merge their own pull requests once checks pass. Pass `--approvals N` to require independent review.
-- Restrict a publishing environment that deploys from all branches to the protected release branch, keeping existing branch policies.
-- Require approval before running workflows for first-time contributors' fork pull requests, keeping a stricter existing policy.
 
 <!-- bake-readme:releases:end -->
 

@@ -1,6 +1,6 @@
 # Releases
 
-## Unreleased
+## v0.8.0
 
 - Add `cargo:setup:artifacts`, which generates a `release-artifacts.yml` workflow that builds, signs, verifies, and attaches project-specific files to the GitHub Release from the released commit, and `cargo:release:artifacts:detect`, which checks that the commit is on the release branch and matches the tag and version. Projects supply only `scripts/release-artifacts/build`, `sign`, and `verify`; signing secrets reach only the sign step, on a runner that never ran the build.
 - Block updates to release tags, as well as deletion, in the release tag ruleset that `cargo:setup:github:apply` manages, so nobody can move a published tag to another commit.

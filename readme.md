@@ -164,6 +164,12 @@ Prepare a release with `cargo bake cargo:release:patch` (or `minor`, `major`, or
 
 See [releases.md](releases.md) for the full release history.
 
+### v0.9.0
+
+- Install a pinned Bake launcher version in generated `publish.yml` and `release-artifacts.yml` workflows, check out without persisting credentials in `publish.yml`, and, in GitHub Actions, authenticate `cargo:release:publish`'s tag push with `GH_TOKEN` through an environment-reading credential helper scoped to the GitHub server. Regenerate existing workflows with `cargo:setup:workflow --force true` after reviewing them.
+- Let `cargo:release:bump` prepare a first release of the version already in the manifests, while no workspace package has it on crates.io and its release tag does not exist, instead of requiring a hand-made release commit.
+- Keep the leading `=`, `^`, `~`, or `>=` operator when release tasks bump a local dependency requirement, so an exact pin such as `=0.1.0` between packages that release together becomes `=0.1.1` instead of a caret requirement.
+
 ### v0.8.0
 
 - Add `cargo:setup:artifacts`, which generates a `release-artifacts.yml` workflow that builds, signs, verifies, and attaches project-specific files to the GitHub Release from the released commit, and `cargo:release:artifacts:detect`, which checks that the commit is on the release branch and matches the tag and version. Projects supply only `scripts/release-artifacts/build`, `sign`, and `verify`; signing secrets reach only the sign step, on a runner that never ran the build.
@@ -174,10 +180,6 @@ See [releases.md](releases.md) for the full release history.
 - Add `cargo:release:patch`, `cargo:release:minor`, `cargo:release:major`, and `cargo:release:bump --version X.Y.Z`, which from a clean checkout of the release branch create a `release-{tag}` branch, bump the version, commit with the `Release: {tag}` trailer, validate the candidate, push, and open the release pull request with the release notes and trailer as its body.
 - Remove the `cargo:version:patch`, `cargo:version:minor`, `cargo:version:major`, and `cargo:version:bump` tasks. The `cargo:release:*` tasks perform the same version update and run the `cargo:after_version_bump` hook, so a release is one command followed by review and merge.
 - Set the repository's squash merge commit title and message to the pull request title and body in `cargo:setup:github:apply`, and show the setting in `cargo:setup:github:plan`, so the release trailer survives a squash merge with review fix-ups.
-
-### v0.6.1
-
-- Fail `cargo:setup:github:apply` before changing anything when a reviewer team cannot access the repository, printing the command that grants access, and list such teams in `cargo:setup:github:plan`. After saving the environment, read it back and fail when GitHub has silently dropped a requested reviewer.
 
 <!-- bake-readme:releases:end -->
 

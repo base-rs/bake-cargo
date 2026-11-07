@@ -2,6 +2,12 @@
 # project-specific files and attaches them to the GitHub Release that
 # publish.yml creates. The project supplies scripts/release-artifacts/build,
 # sign, and verify; this workflow supplies the release checks.
+#
+# SECURITY: Actions are pinned to release tags, not commit SHAs, so whoever controls an
+# action could move its tag and run new code in jobs that hold `id-token` or `contents`
+# write permissions. This is accepted because each action comes from GitHub, the Rust
+# project, or the maintainer of `dtolnay/rust-toolchain`, who already control the runner,
+# the toolchain, or the publishing this workflow trusts; pin them to SHAs if that changes.
 name: Release artifacts
 
 on:

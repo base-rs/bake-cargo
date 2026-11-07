@@ -329,8 +329,10 @@ fn update_table_dependency(
         .get("package")
         .and_then(Item::as_str)
         .unwrap_or(name);
-    if package_names.contains(package_name) && dependency.get("version").is_some() {
-        dependency["version"] = value(target.to_string());
+    if package_names.contains(package_name)
+        && let Some(current) = dependency.get("version").and_then(Item::as_str)
+    {
+        dependency["version"] = value(bumped_requirement(current, target));
     }
 }
 
@@ -344,9 +346,23 @@ fn update_inline_dependency(
         .get("package")
         .and_then(TomlValue::as_str)
         .unwrap_or(name);
-    if package_names.contains(package_name) && dependency.get("version").is_some() {
-        dependency.insert("version", TomlValue::from(target.to_string()));
+    if package_names.contains(package_name)
+        && let Some(current) = dependency.get("version").and_then(TomlValue::as_str)
+    {
+        let requirement = bumped_requirement(current, target);
+        dependency.insert("version", TomlValue::from(requirement));
     }
+}
+
+/// The requirement on a bumped workspace package: the new version, keeping a single leading `=`, `^`, `~`, or `>=` operator, so an exact pin between packages that must release together stays exact.
+fn bumped_requirement(current: &str, target: Version) -> String {
+    let current = current.trim();
+    let operator = [">=", "=", "^", "~"]
+        .into_iter()
+        .find(|operator| current.starts_with(operator))
+        .filter(|_| !current.contains(','))
+        .unwrap_or_default();
+    format!("{operator}{target}")
 }
 
 fn replace_file(path: &Path, contents: &str) -> Result<()> {
@@ -600,6 +616,34 @@ mod tests {
         assert_eq!(
             document["target"]["cfg(unix)"]["dependencies"]["second-target"]["version"].as_str(),
             Some("0.2.0")
+        );
+    }
+
+    #[test]
+    fn bumped_requirements_keep_their_operator() {
+        let target = Version::parse("0.2.0").unwrap();
+        for (current, expected) in [
+            ("0.1.0", "0.2.0"),
+            ("=0.1.0", "=0.2.0"),
+            (" = 0.1.0", "=0.2.0"),
+            ("^0.1", "^0.2.0"),
+            ("~0.1.0", "~0.2.0"),
+            (">=0.1.0", ">=0.2.0"),
+            (">=0.1.0, <0.2.0", "0.2.0"),
+        ] {
+            assert_eq!(bumped_requirement(current, target), expected, "{current}");
+        }
+
+        let source = "[dependencies]\nmacros = { version = \"=0.1.0\", path = \"macros\" }\n\n[dev-dependencies.macros]\nversion = \"=0.1.0\"\npath = \"macros\"\n";
+        let mut document: DocumentMut = source.parse().unwrap();
+        update_local_dependency_versions(&mut document, target, &HashSet::from(["macros"]));
+        assert_eq!(
+            document["dependencies"]["macros"]["version"].as_str(),
+            Some("=0.2.0")
+        );
+        assert_eq!(
+            document["dev-dependencies"]["macros"]["version"].as_str(),
+            Some("=0.2.0")
         );
     }
 

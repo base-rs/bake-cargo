@@ -152,7 +152,7 @@ cargo bake cargo:releases:github:release vX.Y.Z --draft true
 
 The task uses the authenticated `gh` CLI. Omit `--draft true` to publish the release immediately.
 
-The Cargo release integration supports crates.io and GitHub Actions. The `cargo:release:*` tasks edit Cargo package version fields and local dependency requirements, commit, push, and open a pull request, but never tag or publish. The GitHub release task publishes a GitHub Release explicitly. The setup task only manages its named repository rulesets, and GitHub may require repository or organization plan features for some settings.
+The Cargo release integration supports crates.io and GitHub Actions. The `cargo:release:*` tasks edit Cargo package version fields and local dependency requirements, keeping a requirement's leading `=`, `^`, `~`, or `>=` operator so exact pins between packages stay exact, commit, push, and open a pull request, but never tag or publish. The GitHub release task publishes a GitHub Release explicitly. The setup task only manages its named repository rulesets, and GitHub may require repository or organization plan features for some settings.
 
 ## Releasing
 

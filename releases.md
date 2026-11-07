@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Install a pinned Bake launcher version in generated `publish.yml` and `release-artifacts.yml` workflows, check out without persisting credentials in `publish.yml`, and authenticate `cargo:release:publish`'s tag push with `GH_TOKEN` through an environment-reading credential helper. Regenerate existing workflows with `cargo:setup:workflow --force true` after reviewing them.
+- Install a pinned Bake launcher version in generated `publish.yml` and `release-artifacts.yml` workflows, check out without persisting credentials in `publish.yml`, and, in GitHub Actions, authenticate `cargo:release:publish`'s tag push with `GH_TOKEN` through an environment-reading credential helper scoped to the GitHub server. Regenerate existing workflows with `cargo:setup:workflow --force true` after reviewing them.
 - Keep the leading `=`, `^`, `~`, or `>=` operator when release tasks bump a local dependency requirement, so an exact pin such as `=0.1.0` between packages that release together becomes `=0.1.1` instead of a caret requirement.
 
 ## v0.8.0

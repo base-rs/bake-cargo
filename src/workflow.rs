@@ -332,35 +332,47 @@ fn create_release_tag(context: &Context, tag: &str, sha: &str) -> Result<()> {
         )?;
     }
 
-    run_git(
-        context,
-        &push_arguments(reference, std::env::var_os("GH_TOKEN")),
-    )
+    let arguments = push_arguments(&reference, |name| std::env::var_os(name));
+    // Name the push without the credential configuration, which only adds noise.
+    run_git_as(context, &arguments, &format!("push origin {reference}"))
 }
 
-/// Push one reference. Generated workflows check out without persisting credentials, so a nonempty `GH_TOKEN` authenticates this push through a credential helper that reads it from the environment, keeping the token out of command arguments.
-fn push_arguments(reference: String, token: Option<std::ffi::OsString>) -> Vec<String> {
+/// Push one reference. In GitHub Actions, generated workflows check out without persisting credentials, so a nonempty `GH_TOKEN` authenticates this push through a credential helper scoped to the workflow's GitHub server, which reads the token from the environment and keeps it out of command arguments. Elsewhere, the user's own git credentials apply.
+fn push_arguments(
+    reference: &str,
+    variable: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Vec<String> {
     let mut arguments = Vec::new();
-    if token.is_some_and(|token| !token.is_empty()) {
+    let in_actions = variable("GITHUB_ACTIONS").is_some_and(|value| value == "true");
+    let has_token = variable("GH_TOKEN").is_some_and(|token| !token.is_empty());
+    if in_actions && has_token {
+        let server = variable("GITHUB_SERVER_URL")
+            .map(|server| server.to_string_lossy().trim_end_matches('/').to_owned())
+            .filter(|server| !server.is_empty())
+            .unwrap_or_else(|| "https://github.com".to_owned());
         arguments.extend([
             "-c".to_owned(),
-            "credential.helper=".to_owned(),
+            format!("credential.{server}.helper="),
             "-c".to_owned(),
-            "credential.helper=!f() { test \"$1\" = get && echo username=x-access-token && echo \"password=$GH_TOKEN\"; }; f".to_owned(),
+            format!("credential.{server}.helper=!f() {{ test \"$1\" = get && echo username=x-access-token && echo \"password=$GH_TOKEN\"; }}; f"),
         ]);
     }
-    arguments.extend(["push".to_owned(), "origin".to_owned(), reference]);
+    arguments.extend(["push".to_owned(), "origin".to_owned(), reference.to_owned()]);
     arguments
 }
 
 fn run_git(context: &Context, arguments: &[String]) -> Result<()> {
+    run_git_as(context, arguments, &arguments.join(" "))
+}
+
+/// Run git, describing it in errors as `git {description}`.
+fn run_git_as(context: &Context, arguments: &[String], description: &str) -> Result<()> {
     let output = context.command("git").args(arguments).output()?;
     if output.status.success() {
         Ok(())
     } else {
         Err(Error::new(format!(
-            "git {} failed: {}",
-            arguments.join(" "),
+            "git {description} failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         )))
     }
@@ -1585,43 +1597,82 @@ mod push_tests {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
-    #[test]
-    fn pushes_authenticate_with_a_token_only_when_one_is_set() {
-        let plain = ["push", "origin", "refs/tags/v1.2.3"]
-            .map(str::to_owned)
-            .to_vec();
-        assert_eq!(push_arguments("refs/tags/v1.2.3".to_owned(), None), plain);
-        assert_eq!(
-            push_arguments("refs/tags/v1.2.3".to_owned(), Some("".into())),
-            plain
-        );
-        let authenticated = push_arguments("refs/tags/v1.2.3".to_owned(), Some("token".into()));
-        assert_eq!(authenticated[4..], plain);
-        assert!(
-            authenticated
+    fn arguments(variables: &[(&str, &str)]) -> Vec<String> {
+        push_arguments("refs/tags/v1.2.3", |name| {
+            variables
                 .iter()
-                .all(|argument| !argument.contains("token\"") && argument != "token"),
-            "the token stays out of the arguments"
-        );
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).into())
+        })
+    }
 
-        // Git obtains the token from the environment through the configured helper.
+    fn fill(configuration: &[String], host: &str) -> String {
         let mut fill = Command::new("git")
-            .args(&authenticated[..4])
+            .args(configuration)
             .args(["credential", "fill"])
-            .env("GH_TOKEN", "secret-value")
+            .env("GH_TOKEN", "sentinel-7f3a9c")
             .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_ASKPASS", "")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
+            .stderr(Stdio::null())
             .spawn()
             .unwrap();
         fill.stdin
             .take()
             .unwrap()
-            .write_all(b"protocol=https\nhost=github.com\n\n")
+            .write_all(format!("protocol=https\nhost={host}\n\n").as_bytes())
             .unwrap();
-        let output = String::from_utf8(fill.wait_with_output().unwrap().stdout).unwrap();
+        String::from_utf8(fill.wait_with_output().unwrap().stdout).unwrap()
+    }
+
+    #[test]
+    fn pushes_use_the_job_token_only_in_github_actions() {
+        let plain = ["push", "origin", "refs/tags/v1.2.3"]
+            .map(str::to_owned)
+            .to_vec();
+        assert_eq!(arguments(&[]), plain);
+        assert_eq!(
+            arguments(&[("GH_TOKEN", "sentinel-7f3a9c")]),
+            plain,
+            "a local token leaves the user's own credentials alone"
+        );
+        assert_eq!(
+            arguments(&[("GITHUB_ACTIONS", "true"), ("GH_TOKEN", "")]),
+            plain
+        );
+
+        let authenticated =
+            arguments(&[("GITHUB_ACTIONS", "true"), ("GH_TOKEN", "sentinel-7f3a9c")]);
+        assert_eq!(authenticated[4..], plain);
+        assert!(
+            authenticated
+                .iter()
+                .all(|argument| !argument.contains("sentinel-7f3a9c")),
+            "the token stays out of the arguments"
+        );
+        assert!(authenticated[1].starts_with("credential.https://github.com.helper="));
+
+        // Git obtains the token through the helper, for the GitHub server only.
+        let output = fill(&authenticated[..4], "github.com");
         assert!(output.contains("username=x-access-token\n"), "{output}");
-        assert!(output.contains("password=secret-value\n"), "{output}");
+        assert!(output.contains("password=sentinel-7f3a9c\n"), "{output}");
+        assert!(!fill(&authenticated[..4], "example.com").contains("sentinel-7f3a9c"));
+
+        let enterprise = arguments(&[
+            ("GITHUB_ACTIONS", "true"),
+            ("GH_TOKEN", "x"),
+            ("GITHUB_SERVER_URL", "https://git.example.com/"),
+        ]);
+        assert!(enterprise[1].starts_with("credential.https://git.example.com.helper="));
+        let empty_server = arguments(&[
+            ("GITHUB_ACTIONS", "true"),
+            ("GH_TOKEN", "x"),
+            ("GITHUB_SERVER_URL", ""),
+        ]);
+        assert!(empty_server[1].starts_with("credential.https://github.com.helper="));
     }
 
     #[test]

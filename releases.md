@@ -1,5 +1,9 @@
 # Releases
 
+## Unreleased
+
+- Record in generated `publish.yml` and `release-artifacts.yml` workflows, as a `# SECURITY:` comment, why their actions are pinned to release tags rather than commit SHAs, so security audits of projects using them can rely on the stated assumption.
+
 ## v0.9.0
 
 - Install a pinned Bake launcher version in generated `publish.yml` and `release-artifacts.yml` workflows, check out without persisting credentials in `publish.yml`, and, in GitHub Actions, authenticate `cargo:release:publish`'s tag push with `GH_TOKEN` through an environment-reading credential helper scoped to the GitHub server. Regenerate existing workflows with `cargo:setup:workflow --force true` after reviewing them.

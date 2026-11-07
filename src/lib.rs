@@ -381,7 +381,7 @@ pub(crate) mod version {
         Ok(result)
     }
 
-    /// Set the workspace to an explicit stable version greater than its current version.
+    /// Set the workspace to an explicit stable version greater than its current version, or keep the current version for a first release that is not yet published or tagged.
     pub(crate) fn bump(context: &mut Context, version: String) -> Result<Value> {
         let result = crate::version_support::set(context, &version)?;
         run_after_version_bump(context, &result)?;

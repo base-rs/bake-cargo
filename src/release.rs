@@ -29,7 +29,7 @@ pub fn major(context: &mut Context, #[bake(default = "main")] branch: String) ->
     start(context, Bump::Component(Component::Major), &branch)
 }
 
-/// Set an explicit version, commit it with the release trailer, validate it, and open the release pull request.
+/// Set an explicit version, commit it with the release trailer, validate it, and open the release pull request. The current version is accepted for a first release that is not yet published or tagged.
 #[bake::task(name = "cargo:release:bump")]
 pub fn bump(
     context: &mut Context,
@@ -100,7 +100,12 @@ fn open_pull_request(context: &Context, bump: &Bump, base: &str, bumped: &Value)
     let version = new_version(bumped)?;
     let tag = crate::release_tag(context, &version)?;
     let branch = format!("release-{tag}");
-    let subject = bump.subject();
+    // A first release of the version already in the manifests changes no version, so it is not described as a bump.
+    let subject = if bumped.get("previous_version") == bumped.get("version") {
+        format!("Release version {version}.")
+    } else {
+        bump.subject()
+    };
     let trailer = format!("Release: {tag}");
     run(context, "git", &["switch", "--create", &branch])?;
     run(
@@ -590,6 +595,109 @@ mod tests {
                 "{error}"
             );
             assert_eq!(fixture.gh_arguments(), "");
+        }
+
+        #[test]
+        fn releases_the_current_version_when_it_is_not_yet_published_or_tagged() {
+            let mut environment = Environment::new();
+            let fixture = Fixture::new(&mut environment);
+            let root = fixture.project.root();
+            // A new crate: its first version is already in the manifest and has no release notes heading yet.
+            std::fs::write(
+                root.join("releases.md"),
+                "# Releases\n\n## Unreleased\n\n- First release.\n",
+            )
+            .unwrap();
+            git(
+                root,
+                &[
+                    "commit",
+                    "--quiet",
+                    "--all",
+                    "--message",
+                    "Prepare the first release.",
+                ],
+            );
+            let (api, server) =
+                crate::crates_io::tests::mock_server(vec![(404, "crate not found")]);
+            environment.set("BAKE_TEST_CRATES_IO_API", &api);
+
+            let result = super::super::bump(
+                &mut fixture.context(),
+                "1.2.3".to_owned(),
+                "main".to_owned(),
+            )
+            .unwrap();
+            server.join().unwrap();
+            assert_eq!(
+                (result["version"].as_str(), result["tag"].as_str()),
+                (Some("1.2.3"), Some("v1.2.3"))
+            );
+            assert_eq!(
+                git(root, &["log", "-1", "--format=%s"]),
+                "Release version 1.2.3."
+            );
+            assert_eq!(
+                git(
+                    root,
+                    &["log", "-1", "--format=%(trailers:key=Release,valueonly)"]
+                ),
+                "v1.2.3"
+            );
+            assert!(
+                std::fs::read_to_string(root.join("releases.md"))
+                    .unwrap()
+                    .contains("## v1.2.3\n\n- First release.")
+            );
+            assert!(
+                fixture
+                    .gh_arguments()
+                    .contains("--title\nRelease version 1.2.3.\n")
+            );
+        }
+
+        #[test]
+        fn refuses_the_current_version_once_it_is_tagged_or_published() {
+            let mut environment = Environment::new();
+            let fixture = Fixture::new(&mut environment);
+            git(fixture.project.root(), &["tag", "v1.2.3"]);
+            let error = super::super::bump(
+                &mut fixture.context(),
+                "1.2.3".to_owned(),
+                "main".to_owned(),
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("already tagged as v1.2.3"),
+                "{error}"
+            );
+
+            let fixture = Fixture::new(&mut environment);
+            let (api, server) = crate::crates_io::tests::mock_server(vec![(
+                200,
+                r#"{"versions":[{"num":"1.2.3"}]}"#,
+            )]);
+            environment.set("BAKE_TEST_CRATES_IO_API", &api);
+            let error = super::super::bump(
+                &mut fixture.context(),
+                "1.2.3".to_owned(),
+                "main".to_owned(),
+            )
+            .unwrap_err();
+            server.join().unwrap();
+            assert!(
+                error
+                    .to_string()
+                    .contains("fixture 1.2.3 is already published"),
+                "{error}"
+            );
+            assert_eq!(
+                git(
+                    fixture.project.root(),
+                    &["rev-parse", "--abbrev-ref", "HEAD"]
+                ),
+                "main"
+            );
         }
 
         #[test]

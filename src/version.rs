@@ -104,12 +104,54 @@ pub(crate) fn set(context: &Context, target: &str) -> Result<Value> {
     let target = Version::parse(target)?;
     let packages = workspace_packages(context)?;
     let current = shared_version(&packages)?;
-    if target <= current {
+    if target == current {
+        return unreleased_current_version(context, &packages, current);
+    }
+    if target < current {
         return Err(Error::new(format!(
-            "new version {target} must be greater than the current workspace version {current}"
+            "new version {target} must be greater than the current workspace version {current}, or equal to it for a first release that is not yet published or tagged"
         )));
     }
     set_workspace_version(context, &packages, current, target)
+}
+
+/// Release the version already in the manifests, as for a new crate whose first version was chosen when it was created. Nothing is edited, so this is allowed only while no package has that version on crates.io and its release tag does not exist.
+fn unreleased_current_version(
+    context: &Context,
+    packages: &[WorkspacePackage],
+    current: Version,
+) -> Result<Value> {
+    let version = current.to_string();
+    let tag = crate::release_tag(context, &version)?;
+    let tagged = context
+        .command("git")
+        .args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/tags/{tag}"),
+        ])
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if tagged {
+        return Err(Error::new(format!(
+            "version {version} is already tagged as {tag}; choose a greater version"
+        )));
+    }
+    for package in packages {
+        if crate::crates_io::version_is_published(&package.name, &version)? {
+            return Err(Error::new(format!(
+                "{} {version} is already published; choose a greater version",
+                package.name
+            )));
+        }
+    }
+    Ok(json!({
+        "previous_version": version,
+        "version": version,
+        "packages": packages.iter().map(|package| package.name.as_str()).collect::<Vec<_>>(),
+        "manifests_updated": Vec::<String>::new(),
+    }))
 }
 
 fn shared_version(packages: &[WorkspacePackage]) -> Result<Version> {
@@ -687,9 +729,37 @@ mod tests {
         project.cargo_proxy(&mut environment, None);
         let context = project.context();
 
-        for requested in ["1.2.3", "1.2.2", "1.2", "1.2.3-rc.1"] {
+        for requested in ["1.2.2", "1.2", "1.2.3-rc.1"] {
             assert!(set(&context, requested).is_err(), "{requested}");
         }
+        // The current version is accepted only while it is unpublished.
+        let (api, server) =
+            crate::crates_io::tests::mock_server(vec![(200, r#"{"versions":[{"num":"1.2.3"}]}"#)]);
+        environment.set("BAKE_TEST_CRATES_IO_API", &api);
+        assert!(
+            set(&context, "1.2.3")
+                .unwrap_err()
+                .to_string()
+                .contains("already published")
+        );
+        server.join().unwrap();
+        let (api, server) = crate::crates_io::tests::mock_server(vec![(403, "registry denied")]);
+        environment.set("BAKE_TEST_CRATES_IO_API", &api);
+        assert!(set(&context, "1.2.3").is_err());
+        server.join().unwrap();
+        let manifest = fs::read_to_string(project.root().join("Cargo.toml")).unwrap();
+        fs::write(
+            project.root().join("Cargo.toml"),
+            format!("{manifest}\n[workspace.metadata.bake.release]\ntag-prefix = \"-bad\"\n"),
+        )
+        .unwrap();
+        assert!(
+            set(&context, "1.2.3")
+                .unwrap_err()
+                .to_string()
+                .contains("tag prefix")
+        );
+        fs::write(project.root().join("Cargo.toml"), manifest).unwrap();
         assert!(increment(&context, Component::Patch).is_ok());
     }
 

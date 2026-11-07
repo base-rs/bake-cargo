@@ -1,6 +1,6 @@
 # Releases
 
-## Unreleased
+## v0.9.0
 
 - Install a pinned Bake launcher version in generated `publish.yml` and `release-artifacts.yml` workflows, check out without persisting credentials in `publish.yml`, and, in GitHub Actions, authenticate `cargo:release:publish`'s tag push with `GH_TOKEN` through an environment-reading credential helper scoped to the GitHub server. Regenerate existing workflows with `cargo:setup:workflow --force true` after reviewing them.
 - Let `cargo:release:bump` prepare a first release of the version already in the manifests, while no workspace package has it on crates.io and its release tag does not exist, instead of requiring a hand-made release commit.

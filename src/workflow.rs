@@ -334,8 +334,23 @@ fn create_release_tag(context: &Context, tag: &str, sha: &str) -> Result<()> {
 
     run_git(
         context,
-        &["push".to_owned(), "origin".to_owned(), reference],
+        &push_arguments(reference, std::env::var_os("GH_TOKEN")),
     )
+}
+
+/// Push one reference. Generated workflows check out without persisting credentials, so a nonempty `GH_TOKEN` authenticates this push through a credential helper that reads it from the environment, keeping the token out of command arguments.
+fn push_arguments(reference: String, token: Option<std::ffi::OsString>) -> Vec<String> {
+    let mut arguments = Vec::new();
+    if token.is_some_and(|token| !token.is_empty()) {
+        arguments.extend([
+            "-c".to_owned(),
+            "credential.helper=".to_owned(),
+            "-c".to_owned(),
+            "credential.helper=!f() { test \"$1\" = get && echo username=x-access-token && echo \"password=$GH_TOKEN\"; }; f".to_owned(),
+        ]);
+    }
+    arguments.extend(["push".to_owned(), "origin".to_owned(), reference]);
+    arguments
 }
 
 fn run_git(context: &Context, arguments: &[String]) -> Result<()> {
@@ -1561,5 +1576,79 @@ mod tests {
                 .contains("GitHub release creation failed")
         );
         server.join().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod push_tests {
+    use super::push_arguments;
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    #[test]
+    fn pushes_authenticate_with_a_token_only_when_one_is_set() {
+        let plain = ["push", "origin", "refs/tags/v1.2.3"]
+            .map(str::to_owned)
+            .to_vec();
+        assert_eq!(push_arguments("refs/tags/v1.2.3".to_owned(), None), plain);
+        assert_eq!(
+            push_arguments("refs/tags/v1.2.3".to_owned(), Some("".into())),
+            plain
+        );
+        let authenticated = push_arguments("refs/tags/v1.2.3".to_owned(), Some("token".into()));
+        assert_eq!(authenticated[4..], plain);
+        assert!(
+            authenticated
+                .iter()
+                .all(|argument| !argument.contains("token\"") && argument != "token"),
+            "the token stays out of the arguments"
+        );
+
+        // Git obtains the token from the environment through the configured helper.
+        let mut fill = Command::new("git")
+            .args(&authenticated[..4])
+            .args(["credential", "fill"])
+            .env("GH_TOKEN", "secret-value")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        fill.stdin
+            .take()
+            .unwrap()
+            .write_all(b"protocol=https\nhost=github.com\n\n")
+            .unwrap();
+        let output = String::from_utf8(fill.wait_with_output().unwrap().stdout).unwrap();
+        assert!(output.contains("username=x-access-token\n"), "{output}");
+        assert!(output.contains("password=secret-value\n"), "{output}");
+    }
+
+    #[test]
+    fn workflows_pin_a_launcher_no_older_than_the_locked_bake() {
+        let launcher =
+            crate::version_support::Version::parse(crate::BAKE_LAUNCHER_VERSION).unwrap();
+        let lock = include_str!("../Cargo.lock");
+        let locked = lock
+            .split("[[package]]")
+            .find(|package| package.contains("\nname = \"bake\"\n"))
+            .and_then(|package| {
+                package
+                    .lines()
+                    .find_map(|line| line.strip_prefix("version = \""))
+            })
+            .map(|version| version.trim_end_matches('"'))
+            .unwrap();
+        assert!(
+            launcher >= crate::version_support::Version::parse(locked).unwrap(),
+            "update BAKE_LAUNCHER_VERSION to at least the locked Bake {locked}"
+        );
+        for template in [
+            include_str!("publish.yml"),
+            include_str!("release-artifacts.yml"),
+        ] {
+            assert!(!template.contains("cargo install bake --locked"));
+            assert!(template.contains("cargo install bake --version __BAKE_VERSION__ --locked"));
+        }
     }
 }

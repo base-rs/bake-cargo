@@ -250,7 +250,13 @@ pub(crate) fn publish_workflow(packages: &[WorkspacePackage], branch: &str) -> R
     }
     crate::github::validate_branch(branch)?;
 
-    Ok(include_str!("publish.yml").replace("__BRANCH__", branch))
+    Ok(crate::artifacts::render(
+        include_str!("publish.yml"),
+        &[
+            ("__BRANCH__", branch),
+            ("__BAKE_VERSION__", crate::BAKE_LAUNCHER_VERSION),
+        ],
+    ))
 }
 
 #[cfg(test)]
@@ -539,7 +545,12 @@ reviewers = ["Team:123"]
         assert!(workflow.contains("github.event.pull_request.head.sha || github.sha"));
         assert!(workflow.contains("BAKE_SHA: ${{ github.sha }}"));
         assert!(workflow.contains("github.event.pull_request.base.sha || github.event.before"));
-        assert!(workflow.contains("cargo install bake --locked"));
+        assert!(workflow.contains(&format!(
+            "cargo install bake --version {} --locked",
+            crate::BAKE_LAUNCHER_VERSION
+        )));
+        assert!(!workflow.contains("cargo install bake --locked"));
+        assert_eq!(workflow.matches("persist-credentials: false").count(), 2);
         assert!(workflow.contains("cargo bake --locked cargo:release:detect"));
         assert!(workflow.contains("Validate release candidate"));
         assert!(workflow.contains("cargo bake --locked cargo:release"));

@@ -43,12 +43,13 @@ pub(crate) fn release_artifacts_workflow(
             ("__BRANCH__", branch),
             ("__ENVIRONMENT__", environment),
             ("__SECRETS_ENV__", &secrets_env),
+            ("__BAKE_VERSION__", crate::BAKE_LAUNCHER_VERSION),
         ],
     ))
 }
 
 /// Replace placeholders in one pass, so a value is never itself searched for placeholders.
-fn render(template: &str, values: &[(&str, &str)]) -> String {
+pub(crate) fn render(template: &str, values: &[(&str, &str)]) -> String {
     let mut output = String::new();
     let mut rest = template;
     while let Some((index, key, value)) = values

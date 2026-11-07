@@ -65,7 +65,7 @@ jobs:
         if: steps.trailer.outputs.present == 'true'
       - name: Install Bake launcher
         if: steps.trailer.outputs.present == 'true'
-        run: cargo install bake --locked
+        run: cargo install bake --version __BAKE_VERSION__ --locked
       - name: Find the release commit
         id: detect
         if: steps.trailer.outputs.present == 'true'

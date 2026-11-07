@@ -25,6 +25,9 @@ mod test_support;
 use bake_license as _;
 use bake_releases as _;
 
+/// The Bake launcher version that generated workflows install. Workflows that hold publishing or signing credentials run it, so it is pinned rather than taken from whatever is newest on crates.io; update it deliberately with each Bake release.
+pub const BAKE_LAUNCHER_VERSION: &str = "0.20.1";
+
 use bake::{Context, Error, Result, Value};
 use serde_json::json;
 use std::fs;

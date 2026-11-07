@@ -1,5 +1,9 @@
 # Releases
 
+## Unreleased
+
+- Keep the leading `=`, `^`, `~`, or `>=` operator when release tasks bump a local dependency requirement, so an exact pin such as `=0.1.0` between packages that release together becomes `=0.1.1` instead of a caret requirement.
+
 ## v0.8.0
 
 - Add `cargo:setup:artifacts`, which generates a `release-artifacts.yml` workflow that builds, signs, verifies, and attaches project-specific files to the GitHub Release from the released commit, and `cargo:release:artifacts:detect`, which checks that the commit is on the release branch and matches the tag and version. Projects supply only `scripts/release-artifacts/build`, `sign`, and `verify`; signing secrets reach only the sign step, on a runner that never ran the build.

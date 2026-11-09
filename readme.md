@@ -164,6 +164,11 @@ Prepare a release with `cargo bake cargo:release:patch` (or `minor`, `major`, or
 
 See [releases.md](releases.md) for the full release history.
 
+### v0.9.3
+
+- Install Bake launcher 0.20.2 in generated `publish.yml` and `release-artifacts.yml` workflows. Existing workflows keep their pinned version until regenerated with `--force true`, passing `cargo:setup:artifacts` its original `--environment` and `--secrets`, or until their `cargo install bake --version` lines are updated.
+- Require `bake` 0.20 or later, instead of any 0.x version, so that Cargo resolves this crate to the same `bake` as a task package that requires `bake` 0.20.2. In a workspace whose `rust-version` is below the 1.88 that `bake` 0.20.2 declares, Cargo resolved the old requirement to `bake` 0.19.2, which declares none, and the task package failed to compile against two `bake` versions.
+
 ### v0.9.2
 
 - Refresh the bumped packages' versions in the repository's other tracked `Cargo.lock` files, such as those of benchmark or fuzz workspaces excluded from the released one, when a `cargo:release:*` task bumps the version, and commit them with the release. A lockfile changes only when its workspace reaches a bumped package through path dependencies, and only those packages' versions change, so `--locked` builds of nested workspaces keep working without amending the release commit by hand.
@@ -172,12 +177,6 @@ See [releases.md](releases.md) for the full release history.
 ### v0.9.1
 
 - Record in generated `publish.yml` and `release-artifacts.yml` workflows, as a `# SECURITY:` comment, why their actions are pinned to release tags rather than commit SHAs, so security audits of projects using them can rely on the stated assumption.
-
-### v0.9.0
-
-- Install a pinned Bake launcher version in generated `publish.yml` and `release-artifacts.yml` workflows, check out without persisting credentials in `publish.yml`, and, in GitHub Actions, authenticate `cargo:release:publish`'s tag push with `GH_TOKEN` through an environment-reading credential helper scoped to the GitHub server. Regenerate existing workflows with `cargo:setup:workflow --force true` after reviewing them.
-- Let `cargo:release:bump` prepare a first release of the version already in the manifests, while no workspace package has it on crates.io and its release tag does not exist, instead of requiring a hand-made release commit.
-- Keep the leading `=`, `^`, `~`, or `>=` operator when release tasks bump a local dependency requirement, so an exact pin such as `=0.1.0` between packages that release together becomes `=0.1.1` instead of a caret requirement.
 
 <!-- bake-readme:releases:end -->
 

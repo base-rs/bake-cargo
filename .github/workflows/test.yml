@@ -30,6 +30,25 @@ jobs:
       - name: Run tests and require complete source-region coverage
         run: cargo bake --locked test:coverage --all-targets true
 
+  minimum-rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: Read the declared minimum Rust version
+        id: rust-version
+        run: |
+          version=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          test -n "$version" || { echo "Cargo.toml declares no rust-version" >&2; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust-version.outputs.version }}
+      - name: Build the publishable packages with the declared minimum Rust version
+        run: |
+          packages=$(cargo metadata --no-deps --format-version 1 --locked | jq -r '.packages[] | select(.publish != []) | "--package=\(.name)"')
+          cargo check $packages --all-targets --locked
+
   license:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -49,7 +68,7 @@ jobs:
 
   test-result:
     if: always()
-    needs: [test, license]
+    needs: [test, minimum-rust, license]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

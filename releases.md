@@ -1,5 +1,9 @@
 # Releases
 
+## Unreleased
+
+- Declare Rust 1.88 as the minimum supported version in `rust-version`, as required by the let-chains in this crate and in `bake` 0.20, and by the `icu_*` crates that `ureq` uses through `url`.
+
 ## v0.9.1
 
 - Record in generated `publish.yml` and `release-artifacts.yml` workflows, as a `# SECURITY:` comment, why their actions are pinned to release tags rather than commit SHAs, so security audits of projects using them can rely on the stated assumption.

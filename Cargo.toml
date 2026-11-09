@@ -2,6 +2,7 @@
 name = "bake-cargo"
 version = "0.9.1"
 edition = "2024"
+rust-version = "1.88"
 license = "MIT"
 repository = "https://github.com/base-rs/bake-cargo"
 description = "Cargo project and release automation tasks for Bake"

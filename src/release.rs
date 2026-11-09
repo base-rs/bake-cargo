@@ -598,6 +598,47 @@ mod tests {
         }
 
         #[test]
+        fn commits_refreshed_nested_workspace_lockfiles_with_the_release() {
+            let mut environment = Environment::new();
+            let fixture = Fixture::new(&mut environment);
+            let root = fixture.project.root();
+            fixture.project.write(
+                "benchmarks/Cargo.toml",
+                "[package]\nname = \"benchmarks\"\nversion = \"0.0.0\"\nedition = \"2024\"\npublish = false\n\n[workspace]\n\n[dependencies]\nfixture = { path = \"..\" }\n",
+            );
+            fixture
+                .project
+                .write("benchmarks/src/lib.rs", "// fixture\n");
+            // Cargo sets `CARGO` for the tests it runs.
+            assert!(
+                Command::new(environment.original("CARGO").unwrap())
+                    .current_dir(root.join("benchmarks"))
+                    .args(["generate-lockfile", "--offline"])
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            git(root, &["add", "benchmarks"]);
+            git(root, &["commit", "--quiet", "--message", "Add benchmarks."]);
+
+            super::super::minor(&mut fixture.context(), "main".to_owned()).unwrap();
+
+            assert_eq!(
+                git(root, &["show", "--format=", "--name-only", "HEAD"]),
+                "Cargo.toml\nbenchmarks/Cargo.lock\nreleases.md"
+            );
+            assert!(
+                std::fs::read_to_string(root.join("benchmarks/Cargo.lock"))
+                    .unwrap()
+                    .contains("name = \"fixture\"\nversion = \"1.3.0\"\n")
+            );
+            assert_eq!(
+                git(root, &["status", "--porcelain", "--untracked-files=no"]),
+                ""
+            );
+        }
+
+        #[test]
         fn releases_the_current_version_when_it_is_not_yet_published_or_tagged() {
             let mut environment = Environment::new();
             let fixture = Fixture::new(&mut environment);

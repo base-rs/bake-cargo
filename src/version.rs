@@ -151,6 +151,7 @@ fn unreleased_current_version(
         "version": version,
         "packages": packages.iter().map(|package| package.name.as_str()).collect::<Vec<_>>(),
         "manifests_updated": Vec::<String>::new(),
+        "lockfiles_updated": Vec::<String>::new(),
     }))
 }
 
@@ -197,19 +198,33 @@ fn set_workspace_version_using(
         .iter()
         .map(|package| package.name.as_str())
         .collect();
-    let (workspace_manifest, manifests) = workspace_manifests(context)?;
+    let workspace = crate::lockfiles::metadata(context, None)?;
+    let workspace_manifest = workspace.workspace_root.join("Cargo.toml");
+    let manifests: BTreeSet<_> = std::iter::once(workspace_manifest.clone())
+        .chain(
+            workspace
+                .packages
+                .iter()
+                .map(|package| package.manifest_path.clone()),
+        )
+        .collect();
     let publishable_manifests: HashSet<_> = packages
         .iter()
         .map(|package| PathBuf::from(&package.manifest_path))
         .collect();
 
     let mut updated = Vec::new();
+    // Publishable packages take the new version, and so does any other member that inherits the workspace version.
+    let mut bumped = HashSet::new();
     for path in manifests {
         let source = fs::read_to_string(&path)
             .map_err(|error| Error::new(format!("{}: {error}", path.display())))?;
         let mut document: DocumentMut = source
             .parse()
             .map_err(|error| Error::new(format!("{}: {error}", path.display())))?;
+        if publishable_manifests.contains(&path) || inherits_workspace_version(&document) {
+            bumped.insert(path.clone());
+        }
         if publishable_manifests.contains(&path) {
             update_package_version(&mut document, current, target)?;
         }
@@ -219,8 +234,15 @@ fn set_workspace_version_using(
         update_local_dependency_versions(&mut document, target, &package_names);
         updated.push((path, document.to_string()));
     }
+    let lockfiles = crate::lockfiles::plan(
+        context,
+        &workspace,
+        &bumped,
+        &current.to_string(),
+        &target.to_string(),
+    )?;
 
-    for (path, contents) in &updated {
+    for (path, contents) in updated.iter().chain(&lockfiles) {
         replace(path, contents)?;
     }
 
@@ -235,41 +257,18 @@ fn set_workspace_version_using(
         "version": target.to_string(),
         "packages": packages.iter().map(|package| package.name.as_str()).collect::<Vec<_>>(),
         "manifests_updated": updated.iter().map(|(path, _)| path.display().to_string()).collect::<Vec<_>>(),
+        "lockfiles_updated": lockfiles.iter().map(|(path, _)| path.display().to_string()).collect::<Vec<_>>(),
     }))
 }
 
-fn workspace_manifests(context: &Context) -> Result<(PathBuf, BTreeSet<PathBuf>)> {
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let output = context
-        .command(cargo)
-        .args(["metadata", "--format-version", "1", "--no-deps"])
-        .output()?;
-    if !output.status.success() {
-        return Err(Error::new(format!(
-            "cargo metadata failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .map_err(|error| Error::new(format!("could not parse Cargo metadata: {error}")))?;
-    let root = metadata
-        .get("workspace_root")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| Error::new("Cargo metadata did not contain a workspace root"))?;
-    let workspace_manifest = Path::new(root).join("Cargo.toml");
-    let packages = metadata
-        .get("packages")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| Error::new("Cargo metadata did not contain a packages array"))?;
-    let mut manifests = BTreeSet::from([workspace_manifest.clone()]);
-    for package in packages {
-        let manifest = package
-            .get("manifest_path")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| Error::new("Cargo metadata package has no manifest path"))?;
-        manifests.insert(PathBuf::from(manifest));
-    }
-    Ok((workspace_manifest, manifests))
+fn inherits_workspace_version(document: &DocumentMut) -> bool {
+    document
+        .get("package")
+        .and_then(|package| package.get("version"))
+        .and_then(Item::as_table_like)
+        .and_then(|version| version.get("workspace"))
+        .and_then(Item::as_bool)
+        == Some(true)
 }
 
 fn update_package_version(
@@ -952,7 +951,8 @@ mod tests {
         );
         environment.set("CARGO", failed.as_os_str());
         assert!(
-            workspace_manifests(&project.context())
+            crate::lockfiles::metadata(&project.context(), None)
+                .map(drop)
                 .unwrap_err()
                 .to_string()
                 .contains("metadata-denied")
@@ -960,7 +960,7 @@ mod tests {
 
         let missing_cargo = project.root().join("missing-cargo");
         environment.set("CARGO", missing_cargo.as_os_str());
-        assert!(workspace_manifests(&project.context()).is_err());
+        assert!(crate::lockfiles::metadata(&project.context(), None).is_err());
 
         for (metadata, expected) in [
             ("not json", "could not parse Cargo metadata"),
@@ -970,10 +970,15 @@ mod tests {
                 r#"{"workspace_root":"/tmp","packages":[{}]}"#,
                 "no manifest path",
             ),
+            (
+                r#"{"workspace_root":"/tmp","packages":[{"manifest_path":"/tmp/Cargo.toml"}]}"#,
+                "no name",
+            ),
         ] {
             fake_metadata(&project, &mut environment, metadata);
             assert!(
-                workspace_manifests(&project.context())
+                crate::lockfiles::metadata(&project.context(), None)
+                    .map(drop)
                     .unwrap_err()
                     .to_string()
                     .contains(expected)
@@ -988,10 +993,22 @@ mod tests {
         let project = Project::new();
         workspace(&project);
 
-        let (_, manifests) = workspace_manifests(&project.context()).unwrap();
+        let metadata = crate::lockfiles::metadata(&project.context(), None).unwrap();
 
-        assert_eq!(manifests.len(), 4);
-        assert!(manifests.contains(&fs::canonicalize(project.root().join("Cargo.toml")).unwrap()));
+        assert_eq!(metadata.packages.len(), 3);
+        assert_eq!(
+            metadata.workspace_root,
+            fs::canonicalize(project.root()).unwrap()
+        );
+        let alpha = metadata
+            .packages
+            .iter()
+            .find(|package| package.name == "alpha")
+            .unwrap();
+        assert_eq!(
+            alpha.path_dependencies,
+            [fs::canonicalize(project.root().join("crates/beta")).unwrap()]
+        );
     }
 
     #[test]
@@ -1043,7 +1060,7 @@ mod tests {
         );
         let metadata = serde_json::json!({
             "workspace_root": workspace_root,
-            "packages": [{"manifest_path": project.root().join("crates/alpha/Cargo.toml")}]
+            "packages": [{"name": "alpha", "manifest_path": project.root().join("crates/alpha/Cargo.toml")}]
         });
         fake_metadata(&project, &mut environment, &metadata.to_string());
         assert!(

@@ -24,7 +24,7 @@ name = "bake_cargo"
 
 [dependencies]
 base-markdown = "0.1.0"
-bake = "0"
+bake = ">=0.20, <1"
 bake-releases = "0.3.7"
 bake-license = "0.2.5"
 serde = { version = "1.0", features = ["derive"] }

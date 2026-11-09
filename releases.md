@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Install Bake launcher 0.20.2 in generated `publish.yml` and `release-artifacts.yml` workflows. Existing workflows keep their pinned version until regenerated with `--force true`, passing `cargo:setup:artifacts` its original `--environment` and `--secrets`, or until their `cargo install bake --version` lines are updated.
+- Require `bake` 0.20 or later, instead of any 0.x version, so that Cargo resolves this crate to the same `bake` as a task package that requires `bake` 0.20.2. In a workspace whose `rust-version` is below the 1.88 that `bake` 0.20.2 declares, Cargo resolved the old requirement to `bake` 0.19.2, which declares none, and the task package failed to compile against two `bake` versions.
 
 ## v0.9.2
 

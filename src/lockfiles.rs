@@ -5,7 +5,7 @@
 //!
 //! A repository can hold Cargo workspaces besides the released one, such as benchmarks or fuzz targets excluded from it, each with its own `Cargo.lock`. When those depend on released packages by path, their lockfiles record the packages' versions, so a version bump leaves them stale and `--locked` builds fail until they are refreshed.
 //!
-//! Only lockfiles change. A nested manifest that also gives such a path dependency a version requirement, or that reaches a released package only through `[patch]` or `[replace]`, still needs editing by hand.
+//! Only lockfiles change. A nested manifest that also gives such a path dependency a version requirement, or that reaches a released package only through `[patch]` or `[replace]`, still needs editing by hand, as does a lockfile that reaches a released package only through a `workspace = true` dependency of a crate in a third workspace.
 
 use bake::{Context, Error, Result};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -209,7 +209,7 @@ fn packages(document: &DocumentMut) -> impl Iterator<Item = (String, String, boo
         })
 }
 
-/// The directories of the path dependencies declared in the manifest of a crate outside the released and nested workspaces. Development dependencies are left out, as Cargo resolves them only for workspace members, and so are `workspace = true` entries, which belong to that crate's own workspace.
+/// The directories of the path dependencies declared in the manifest of a crate outside the released and nested workspaces. Development dependencies are left out, as Cargo resolves them only for workspace members. `workspace = true` entries are not followed: their paths are in that crate's own workspace manifest, so a released package reached only through one is not found.
 fn manifest_path_dependencies(directory: &Path) -> Vec<PathBuf> {
     let document: Option<DocumentMut> = fs::read_to_string(directory.join("Cargo.toml"))
         .ok()
@@ -228,7 +228,7 @@ fn manifest_path_dependencies(directory: &Path) -> Vec<PathBuf> {
     tables
         .into_iter()
         .flat_map(|table| {
-            ["dependencies", "build-dependencies"]
+            ["dependencies", "build-dependencies", "build_dependencies"]
                 .into_iter()
                 .filter_map(|group| table.get(group).and_then(Item::as_table_like))
         })
@@ -628,7 +628,7 @@ mod tests {
 
         project.write(
             "crate/Cargo.toml",
-            "[package]\nname = \"crate\"\n\n[dependencies]\nregistry = \"1\"\nlocal = { path = \"../local\" }\nversioned = { version = \"1\" }\ninherited = { workspace = true }\nnumeric = { path = 1 }\n\n[dependencies.table]\npath = \"table\"\n\n[build-dependencies]\nbuild = { path = \"build\" }\n\n[dev-dependencies]\ndevelopment = { path = \"development\" }\n\n[target.'cfg(unix)'.dependencies]\nplatform = { path = \"platform\" }\n\n[target]\ninvalid = \"not a table\"\n",
+            "[package]\nname = \"crate\"\n\n[dependencies]\nregistry = \"1\"\nlocal = { path = \"../local\" }\nversioned = { version = \"1\" }\ninherited = { workspace = true }\nnumeric = { path = 1 }\n\n[dependencies.table]\npath = \"table\"\n\n[build-dependencies]\nbuild = { path = \"build\" }\n\n[build_dependencies]\nlegacy = { path = \"legacy\" }\n\n[dev-dependencies]\ndevelopment = { path = \"development\" }\n\n[target.'cfg(unix)'.dependencies]\nplatform = { path = \"platform\" }\n\n[target]\ninvalid = \"not a table\"\n",
         );
         let directory = project.root().join("crate");
         assert_eq!(
@@ -637,6 +637,7 @@ mod tests {
                 directory.join("../local"),
                 directory.join("table"),
                 directory.join("build"),
+                directory.join("legacy"),
                 directory.join("platform"),
             ]
         );

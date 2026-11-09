@@ -32,7 +32,7 @@ jobs:
         with:
           components: clippy, rustfmt
       - name: Install Bake launcher
-        run: cargo install bake --version 0.20.1 --locked
+        run: cargo install bake --version 0.20.2 --locked
       - name: Detect an explicit release request
         id: detect
         env:
@@ -67,7 +67,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - name: Install Bake launcher
-        run: cargo install bake --version 0.20.1 --locked
+        run: cargo install bake --version 0.20.2 --locked
       - name: Find workspace packages that need publishing
         id: packages
         env:

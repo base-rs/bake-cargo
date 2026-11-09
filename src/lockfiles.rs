@@ -4,12 +4,14 @@
 //! Version refreshes for the lockfiles of nested workspaces.
 //!
 //! A repository can hold Cargo workspaces besides the released one, such as benchmarks or fuzz targets excluded from it, each with its own `Cargo.lock`. When those depend on released packages by path, their lockfiles record the packages' versions, so a version bump leaves them stale and `--locked` builds fail until they are refreshed.
+//!
+//! Only lockfiles change. A nested manifest that also gives such a path dependency a version requirement, or that reaches a released package only through `[patch]` or `[replace]`, still needs editing by hand.
 
 use bake::{Context, Error, Result};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use toml_edit::{DocumentMut, Item, Value as TomlValue, value};
+use toml_edit::{DocumentMut, Item, TableLike, Value as TomlValue, value};
 
 /// A package from `cargo metadata --no-deps`: its name, manifest, and the directories of its path dependencies.
 pub(crate) struct ManifestPackage {
@@ -82,7 +84,7 @@ pub(crate) fn metadata(context: &Context, manifest_path: Option<&Path>) -> Resul
 
 /// Plan the new contents of every other tracked `Cargo.lock` in the repository that records a bumped package of `workspace` by path at `current`.
 ///
-/// `bumped` holds the manifests of the workspace packages whose version changes from `current` to `target`. A lockfile is refreshed only when the workspace that uses it reaches one of those manifests through path dependencies, followed through that workspace's members and the released workspace's members, so a copy of a package kept elsewhere in the repository under the same name and version is left alone. Only the matching packages' `version` fields and the dependency references that name those versions change; every other entry, including registry versions and checksums, is kept byte for byte. Lockfiles whose workspace Cargo cannot read, and untracked lockfiles, are not changed.
+/// `bumped` holds the manifests of the workspace packages whose version changes from `current` to `target`. A lockfile is refreshed only when the workspace that uses it reaches one of those manifests through path dependencies, followed through that workspace's members, the released workspace's members, and the manifests of other path crates, so a copy of a package kept elsewhere in the repository under the same name and version is left alone. Only the matching packages' `version` fields and the dependency references that name those versions change; every other entry, including registry versions and checksums, is kept byte for byte. Lockfiles whose workspace Cargo cannot read, lockfiles that also hold a bumped package's name at the new version from another source, which the edited references could no longer tell apart, and untracked lockfiles are not changed.
 pub(crate) fn plan(
     context: &Context,
     workspace: &Metadata,
@@ -136,9 +138,11 @@ fn plan_lockfile(
         .ok()?
         .parse()
         .ok()?;
-    let candidates: HashSet<String> = path_packages(&document)
-        .filter(|(name, version)| version == current && bumped_names.contains(name))
-        .map(|(name, _)| name)
+    let candidates: HashSet<String> = packages(&document)
+        .filter(|(name, version, sourced)| {
+            !sourced && version == current && bumped_names.contains(name)
+        })
+        .map(|(name, _, _)| name)
         .collect();
     if candidates.is_empty() {
         return None;
@@ -168,11 +172,14 @@ fn plan_lockfile(
         {
             referenced.insert(name.clone());
         }
-        if let Some(next) = dependencies.get(&directory) {
-            pending.extend(next.iter().cloned());
-        }
+        let next = dependencies
+            .entry(directory.clone())
+            .or_insert_with(|| manifest_path_dependencies(&directory));
+        pending.extend(next.iter().cloned());
     }
-    if referenced.is_empty() {
+    let collides = packages(&document)
+        .any(|(name, version, sourced)| sourced && version == target && referenced.contains(&name));
+    if referenced.is_empty() || collides {
         return None;
     }
 
@@ -180,23 +187,60 @@ fn plan_lockfile(
     Some(document.to_string())
 }
 
-/// The name and version of each lockfile entry without a `source`, which Cargo writes for workspace members and path dependencies.
-fn path_packages(document: &DocumentMut) -> impl Iterator<Item = (String, String)> + '_ {
+/// The name and version of each lockfile entry, and whether it has a `source`, which Cargo omits for workspace members and path dependencies.
+fn packages(document: &DocumentMut) -> impl Iterator<Item = (String, String, bool)> + '_ {
     document
         .get("package")
         .and_then(Item::as_array_of_tables)
         .into_iter()
         .flatten()
-        .filter(|package| !package.contains_key("source"))
         .filter_map(|package| {
             match (
                 package.get("name").and_then(Item::as_str),
                 package.get("version").and_then(Item::as_str),
             ) {
-                (Some(name), Some(version)) => Some((name.to_owned(), version.to_owned())),
+                (Some(name), Some(version)) => Some((
+                    name.to_owned(),
+                    version.to_owned(),
+                    package.contains_key("source"),
+                )),
                 _ => None,
             }
         })
+}
+
+/// The directories of the path dependencies declared in the manifest of a crate outside the released and nested workspaces. Development dependencies are left out, as Cargo resolves them only for workspace members, and so are `workspace = true` entries, which belong to that crate's own workspace.
+fn manifest_path_dependencies(directory: &Path) -> Vec<PathBuf> {
+    let document: Option<DocumentMut> = fs::read_to_string(directory.join("Cargo.toml"))
+        .ok()
+        .and_then(|source| source.parse().ok());
+    let mut tables = Vec::new();
+    if let Some(document) = &document {
+        tables.push(document.as_table() as &dyn TableLike);
+        let targets = document.get("target").and_then(Item::as_table_like);
+        tables.extend(
+            targets
+                .into_iter()
+                .flat_map(|targets| targets.iter())
+                .filter_map(|(_, target)| target.as_table_like()),
+        );
+    }
+    tables
+        .into_iter()
+        .flat_map(|table| {
+            ["dependencies", "build-dependencies"]
+                .into_iter()
+                .filter_map(|group| table.get(group).and_then(Item::as_table_like))
+        })
+        .flat_map(|group| group.iter())
+        .filter_map(|(_, dependency)| {
+            dependency
+                .as_table_like()
+                .and_then(|dependency| dependency.get("path"))
+                .and_then(Item::as_str)
+        })
+        .map(|path| canonical(&directory.join(path)))
+        .collect()
 }
 
 fn refresh_versions(
@@ -306,7 +350,6 @@ mod tests {
     }
 
     /// Run the real Cargo that runs these tests, which sets `CARGO`, keeping its output out of the test report.
-    /// Run the real Cargo that runs these tests, which sets `CARGO`, keeping its output out of the test report.
     fn cargo(environment: &Environment, arguments: &[&str]) -> bool {
         Command::new(environment.original("CARGO").unwrap())
             .args(arguments)
@@ -378,12 +421,17 @@ mod tests {
         }
         generate_lockfile(environment, &project.root().join("Cargo.toml"));
 
-        // A standalone path dependency outside every workspace, whose own dependencies are not followed.
+        // Path crates outside every workspace: one without dependencies, and one shared by nested workspaces that reaches a released package.
         project.write(
             "vendor/helper/Cargo.toml",
             "[package]\nname = \"helper\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n",
         );
         project.write("vendor/helper/src/lib.rs", "// fixture\n");
+        project.write(
+            "shared/common/Cargo.toml",
+            "[package]\nname = \"common\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\nbeta = { path = \"../../crates/beta\" }\n",
+        );
+        project.write("shared/common/src/lib.rs", "// fixture\n");
         // Nested workspaces reaching released packages directly, through an unpublished member that inherits the version, and through one with its own version.
         for (directory, name, dependencies) in [
             (
@@ -405,6 +453,11 @@ mod tests {
                 "untracked",
                 "untracked",
                 "alpha = { path = \"../crates/alpha\" }\n",
+            ),
+            (
+                "client",
+                "client",
+                "common = { path = \"../shared/common\" }\n",
             ),
         ] {
             let manifest = nested(&project, directory, name, dependencies);
@@ -428,6 +481,17 @@ mod tests {
             "version = 4\n\n[[package]]\nname = \"alpha\"\n",
         );
         project.write("results/deleted/Cargo.lock", STALE);
+        // A nested lockfile that also holds the next version of a released package from the registry.
+        nested(
+            &project,
+            "colliding",
+            "colliding",
+            "alpha = { path = \"../crates/alpha\" }\n",
+        );
+        project.write(
+            "colliding/Cargo.lock",
+            "version = 4\n\n[[package]]\nname = \"alpha\"\nversion = \"1.2.3\"\n\n[[package]]\nname = \"alpha\"\nversion = \"1.2.4\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"00\"\n\n[[package]]\nname = \"colliding\"\nversion = \"0.0.0\"\ndependencies = [\n \"alpha 1.2.3\",\n]\n",
+        );
 
         git(
             project.root(),
@@ -461,6 +525,8 @@ mod tests {
             "results/no-manifest",
             "results/invalid",
             "results/partial",
+            "client",
+            "colliding",
         ]
         .into_iter()
         .map(|directory| {
@@ -496,6 +562,7 @@ mod tests {
             updated,
             [
                 "benchmarks/Cargo.lock",
+                "client/Cargo.lock",
                 "fuzz/Cargo.lock",
                 "tools/Cargo.lock"
             ]
@@ -506,6 +573,7 @@ mod tests {
             let bumped = match directory {
                 "benchmarks" | "tools" => &["alpha", "beta"][..],
                 "fuzz" => &["alpha", "beta", "support"][..],
+                "client" => &["beta"][..],
                 _ => &[][..],
             };
             let mut expected = previous;
@@ -520,7 +588,7 @@ mod tests {
         assert!(!read(&project, "tools/Cargo.lock").contains("version = \"0.1.1\""));
 
         // Each refreshed lockfile is what Cargo itself would now write.
-        for directory in ["benchmarks", "fuzz", "tools"] {
+        for directory in ["benchmarks", "client", "fuzz", "tools"] {
             let manifest = project.root().join(directory).join("Cargo.toml");
             let arguments = [
                 "metadata",
@@ -551,6 +619,27 @@ mod tests {
 
         assert!(error.to_string().contains("git ls-files"), "{error}");
         assert_eq!(read(&project, "Cargo.toml"), manifest);
+    }
+
+    #[test]
+    fn reads_path_dependencies_from_manifests_outside_the_workspaces() {
+        let project = Project::new();
+        assert!(manifest_path_dependencies(&project.root().join("missing")).is_empty());
+
+        project.write(
+            "crate/Cargo.toml",
+            "[package]\nname = \"crate\"\n\n[dependencies]\nregistry = \"1\"\nlocal = { path = \"../local\" }\nversioned = { version = \"1\" }\ninherited = { workspace = true }\nnumeric = { path = 1 }\n\n[dependencies.table]\npath = \"table\"\n\n[build-dependencies]\nbuild = { path = \"build\" }\n\n[dev-dependencies]\ndevelopment = { path = \"development\" }\n\n[target.'cfg(unix)'.dependencies]\nplatform = { path = \"platform\" }\n\n[target]\ninvalid = \"not a table\"\n",
+        );
+        let directory = project.root().join("crate");
+        assert_eq!(
+            manifest_path_dependencies(&directory),
+            [
+                directory.join("../local"),
+                directory.join("table"),
+                directory.join("build"),
+                directory.join("platform"),
+            ]
+        );
     }
 
     #[test]

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Refresh the bumped packages' versions in the repository's other tracked `Cargo.lock` files, such as those of benchmark or fuzz workspaces excluded from the released one, when a `cargo:release:*` task bumps the version, and commit them with the release. A lockfile changes only when its workspace reaches a bumped package through path dependencies, and only those packages' versions change, so `--locked` builds of nested workspaces keep working without amending the release commit by hand.
 - Declare Rust 1.88 as the minimum supported version in `rust-version`, as required by the let-chains in this crate and in `bake` 0.20, and by the `icu_*` crates that `ureq` uses through `url`.
 
 ## v0.9.1

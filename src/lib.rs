@@ -11,6 +11,7 @@ pub mod artifacts;
 mod cargo_support;
 mod crates_io;
 mod github;
+mod lockfiles;
 mod release;
 mod release_tag;
 

@@ -42,7 +42,7 @@ dependencies = [
 
 [[package]]
 name = "bake-cargo"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "bake",
  "bake-license",

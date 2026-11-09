@@ -1,5 +1,9 @@
 # Releases
 
+## Unreleased
+
+- Install Bake launcher 0.20.2 in generated `publish.yml` and `release-artifacts.yml` workflows. Existing workflows keep their pinned version until regenerated with `--force true`, passing `cargo:setup:artifacts` its original `--environment` and `--secrets`, or until their `cargo install bake --version` lines are updated.
+
 ## v0.9.2
 
 - Refresh the bumped packages' versions in the repository's other tracked `Cargo.lock` files, such as those of benchmark or fuzz workspaces excluded from the released one, when a `cargo:release:*` task bumps the version, and commit them with the release. A lockfile changes only when its workspace reaches a bumped package through path dependencies, and only those packages' versions change, so `--locked` builds of nested workspaces keep working without amending the release commit by hand.

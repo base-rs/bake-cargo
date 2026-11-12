@@ -90,6 +90,12 @@ fn start(context: &mut Context, bump: Bump, base: &str) -> Result<Value> {
             "releases start from the {base} branch, but {current} is checked out"
         )));
     }
+    let pending = bake_releases::pending(context, None, Vec::new(), Vec::new())?;
+    if pending.as_array().is_some_and(Vec::is_empty) {
+        return Err(Error::new(
+            "there is nothing to release: no commits since the previous release tag would appear in the release notes",
+        ));
+    }
 
     let bumped = bump.apply(context)?;
     open_pull_request(context, &bump, base, &bumped)
@@ -598,6 +604,32 @@ mod tests {
         }
 
         #[test]
+        fn refuses_to_start_when_nothing_would_be_released() {
+            let mut environment = Environment::new();
+            let fixture = Fixture::new(&mut environment);
+            let root = fixture.project.root();
+            git(root, &["tag", "v1.2.3"]);
+            fixture
+                .project
+                .write(".github/workflows/test.yml", "# CI\n");
+            git(root, &["add", "."]);
+            git(root, &["commit", "--quiet", "--message", "Update CI."]);
+
+            let error = super::super::patch(&mut fixture.context(), "main".to_owned()).unwrap_err();
+            assert!(error.to_string().contains("nothing to release"), "{error}");
+            assert_eq!(git(root, &["rev-parse", "--abbrev-ref", "HEAD"]), "main");
+            assert_eq!(
+                git(root, &["status", "--porcelain", "--untracked-files=no"]),
+                ""
+            );
+
+            environment.set("BAKE_TEST_GIT_FAILURE", "-c");
+            let error = super::super::patch(&mut fixture.context(), "main".to_owned()).unwrap_err();
+            assert!(error.to_string().contains("fake git failure"), "{error}");
+            assert_eq!(fixture.gh_arguments(), "");
+        }
+
+        #[test]
         fn commits_refreshed_nested_workspace_lockfiles_with_the_release() {
             let mut environment = Environment::new();
             let fixture = Fixture::new(&mut environment);
@@ -701,7 +733,19 @@ mod tests {
         fn refuses_the_current_version_once_it_is_tagged_or_published() {
             let mut environment = Environment::new();
             let fixture = Fixture::new(&mut environment);
-            git(fixture.project.root(), &["tag", "v1.2.3"]);
+            let root = fixture.project.root();
+            git(root, &["tag", "v1.2.3"]);
+            fixture.project.write("src/lib.rs", "// changed\n");
+            git(
+                root,
+                &[
+                    "commit",
+                    "--quiet",
+                    "--all",
+                    "--message",
+                    "Change the library.",
+                ],
+            );
             let error = super::super::bump(
                 &mut fixture.context(),
                 "1.2.3".to_owned(),

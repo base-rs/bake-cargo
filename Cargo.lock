@@ -112,13 +112,14 @@ dependencies = [
 
 [[package]]
 name = "bake-releases"
-version = "0.3.7"
+version = "0.3.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d31e33b847a5896ba5723b0391243e56172689720f9325c2c92e1fc57189e505"
+checksum = "8afa510a7ef7b02aa070a7715473ac5e3835b57d13c7312a59f48f0ab04e3686"
 dependencies = [
  "bake",
  "base-markdown",
  "tempfile",
+ "toml_edit",
 ]
 
 [[package]]

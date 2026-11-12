@@ -1,5 +1,15 @@
 # Releases
 
+## v0.11.0
+
+**Breaking changes**
+
+- `cargo:release:detect` fails when the release's section of `releases.md` is not the one `releases:update` generates from the target branch's history. A release pull request whose notes were edited by hand, or that was opened before another change was merged, must be prepared again with `cargo:release:*` from the updated branch. ([#71](https://github.com/base-rs/bake-cargo/pull/71))
+
+**Changes**
+
+- Verify generated release notes when detecting a release, and refuse to start a release with nothing to release. ([#71](https://github.com/base-rs/bake-cargo/pull/71))
+
 ## v0.10.0
 
 - Allow only squash merges in `cargo:setup:github:apply`, which now disables merge commits and rebase merging in the repository settings and allows only `squash` in the branch ruleset's pull request rule, so release notes can be generated from squash commit subjects. Rerun the task, after reviewing `cargo:setup:github:plan`, to update an existing repository.

@@ -1,5 +1,10 @@
 # Releases
 
+## Unreleased
+
+- Allow only squash merges in `cargo:setup:github:apply`, which now disables merge commits and rebase merging in the repository settings and allows only `squash` in the branch ruleset's pull request rule, so release notes can be generated from squash commit subjects. Rerun the task, after reviewing `cargo:setup:github:plan`, to update an existing repository.
+- Keep the rules of an existing managed ruleset that `cargo:setup:github:apply` does not set, such as a merge queue with its parameters, instead of dropping them when replacing the ruleset, and show them in `cargo:setup:github:plan`. Without `--approvals`, an existing branch ruleset now keeps its required approvals rather than being reset to none; a new ruleset still requires none. Conditions, bypass actors, and the rules the task sets, including required status checks, are still replaced, so rerunning the task restores the administrator pull request bypass and the release tag `update` rule, added in v0.8.0, in rulesets saved by older versions or edited by hand; review the plan for these changes.
+
 ## v0.9.3
 
 - Install Bake launcher 0.20.2 in generated `publish.yml` and `release-artifacts.yml` workflows. Existing workflows keep their pinned version until regenerated with `--force true`, passing `cargo:setup:artifacts` its original `--environment` and `--secrets`, or until their `cargo install bake --version` lines are updated.

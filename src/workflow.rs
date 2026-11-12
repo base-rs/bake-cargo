@@ -59,6 +59,20 @@ pub fn detect_release(context: &mut Context, base: String, sha: String) -> Resul
         )));
     }
 
+    // The committed notes must be those generated from the history of the
+    // checked-out candidate's first parent, the target branch, which catches
+    // hand edits and changes merged after the release was prepared.
+    bake_releases::verify(
+        context,
+        tag,
+        "HEAD".to_owned(),
+        PathBuf::from("releases.md"),
+        None,
+        Vec::new(),
+        Vec::new(),
+        None,
+    )?;
+
     append_release_outputs(true, &version, append_github_output)
 }
 
@@ -410,6 +424,29 @@ mod tests {
         project
     }
 
+    /// A project whose release notes have no section for its version yet.
+    fn unreleased_project(version: &str) -> Project {
+        let project = Project::new();
+        project.single_package("fixture", version);
+        project.write("releases.md", "# Releases\n");
+        project
+    }
+
+    /// Write the release's section of `releases.md` from Git history, as the
+    /// release hook does before the release commit.
+    fn prepare_notes(project: &Project, tag: &str) {
+        bake_releases::update(
+            &mut context(project),
+            tag.to_owned(),
+            PathBuf::from("releases.md"),
+            None,
+            Vec::new(),
+            Vec::new(),
+            None,
+        )
+        .unwrap();
+    }
+
     fn git(project: &Project, arguments: &[&str]) -> Output {
         Command::new("git")
             .current_dir(project.root())
@@ -618,7 +655,7 @@ mod tests {
             "Cargo.toml",
             "[package]\nname = \"fixture\"\nversion = \"1.2.3\"\nedition = \"2024\"\n",
         );
-        project.write("releases.md", "# Releases\n\n## v1.2.3\n\nRelease notes.\n");
+        prepare_notes(&project, "v1.2.3");
         let sha = commit(&project);
         let output = set_release_output(&mut environment, &project);
 
@@ -636,11 +673,12 @@ mod tests {
         let mut environment = Environment::new();
         let project = Project::new();
         project.write("README.md", "Initial project overview.\n");
+        project.write("releases.md", "# Releases\n");
         prepare_workspace(&project, &mut environment);
         let base = initialize_git(&project, false);
 
         project.single_package("fixture", "1.2.3");
-        project.write("releases.md", "# Releases\n\n## v1.2.3\n\nRelease notes.\n");
+        prepare_notes(&project, "v1.2.3");
         let sha = commit(&project);
         let output = set_release_output(&mut environment, &project);
 
@@ -822,9 +860,10 @@ mod tests {
     #[test]
     fn releases_prepared_versions_and_accepts_other_git_trailers() {
         let mut environment = Environment::new();
-        let project = release_project("1.2.3");
+        let project = unreleased_project("1.2.3");
         prepare_workspace(&project, &mut environment);
         let base = initialize_git(&project, false);
+        prepare_notes(&project, "v1.2.3");
         let sha = commit_message(
             &project,
             "Bump patch version.\n\nReviewed-by: Test User <test@example.com>\nRelease: v1.2.3\nSigned-off-by: Test User <test@example.com>",
@@ -865,10 +904,7 @@ mod tests {
         prepare_workspace(&project, &mut environment);
         let base = initialize_git(&project, false);
         project.single_package("renamed-fixture", "0.1.0");
-        project.write(
-            "releases.md",
-            "# Releases\n\n## v0.1.0\n\nInitial release.\n",
-        );
+        prepare_notes(&project, "v0.1.0");
         let sha = commit_message(&project, "Bump minor version.\n\nRelease: v0.1.0");
         assert_eq!(
             detect_release(&mut context(&project), base, sha).unwrap(),
@@ -932,6 +968,11 @@ mod tests {
     fn releases_a_renamed_package_without_replacing_historical_tags_or_notes() {
         let mut environment = Environment::new();
         let project = release_project("1.2.3");
+        // Notes written before the switch to generated notes are kept.
+        project.write(
+            "releases.md",
+            "# Releases\n\n## Unreleased\n\nRenamed package.\n\n## v0.1.0\n\nHistorical package.\n",
+        );
         prepare_workspace(&project, &mut environment);
         let base = initialize_git(&project, true);
         git_ok(&project, &["tag", "v0.1.0"]);
@@ -942,10 +983,7 @@ mod tests {
             "Cargo.toml",
             &format!("{manifest}\n[workspace.metadata.bake.release]\ntag-prefix = 'base-v'\n"),
         );
-        project.write(
-            "releases.md",
-            "# Releases\n\n## base-v0.1.0\n\nRenamed package.\n\n## v0.1.0\n\nHistorical package.\n",
-        );
+        prepare_notes(&project, "base-v0.1.0");
         let sha = commit_message(&project, "Rename the package.\n\nRelease: base-v0.1.0");
 
         assert_eq!(
@@ -978,33 +1016,80 @@ mod tests {
     #[test]
     fn validates_the_merge_candidate_using_the_pull_request_head_trailer() {
         let mut environment = Environment::new();
-        let project = release_project("1.2.3");
+        let project = unreleased_project("1.2.3");
         prepare_workspace(&project, &mut environment);
         let base = initialize_git(&project, false);
         git_ok(&project, &["checkout", "-b", "release"]);
+        prepare_notes(&project, "v1.2.3");
         let head = commit(&project);
-        git_ok(&project, &["checkout", "--detach", &base]);
-        project.write("unrelated.txt", "A concurrent main branch change.\n");
-        commit_message(&project, "Update main.");
-        git_ok(
-            &project,
-            &["merge", "--no-ff", "release", "-m", "Merge release branch."],
-        );
-        let merge = git_ok(&project, &["rev-parse", "HEAD"]);
+        let merge = |change: Option<(&str, &str)>| {
+            git_ok(&project, &["checkout", "--quiet", "--detach", &base]);
+            if let Some((path, subject)) = change {
+                project.write(path, "A concurrent main branch change.\n");
+                git_ok(&project, &["add", path]);
+                git_ok(&project, &["commit", "--quiet", "-m", subject]);
+            }
+            git_ok(
+                &project,
+                &["merge", "--no-ff", "release", "-m", "Merge release branch."],
+            );
+            git_ok(&project, &["rev-parse", "HEAD"])
+        };
+
+        let candidate = merge(None);
         assert_eq!(
-            detect_release(&mut context(&project), base.clone(), merge).unwrap(),
+            detect_release(&mut context(&project), base.clone(), candidate).unwrap(),
             json!({"release": false, "version": ""})
         );
         assert_eq!(
             detect_release(&mut context(&project), base.clone(), head.clone()).unwrap(),
             json!({"release": true, "version": "1.2.3"})
         );
+
+        // Maintenance-only changes appear in no notes, so they do not make the release stale.
+        merge(Some((".github/workflows/test.yml", "Update CI.")));
+        assert_eq!(
+            detect_release(&mut context(&project), base.clone(), head.clone()).unwrap(),
+            json!({"release": true, "version": "1.2.3"})
+        );
+
+        // A change merged after the release was prepared is missing from its notes.
+        merge(Some(("unrelated.txt", "Update main.")));
+        let error = detect_release(&mut context(&project), base.clone(), head.clone()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("differs from the notes generated"),
+            "{error}"
+        );
+
         project.single_package("fixture", "1.2.4");
         assert!(
             detect_release(&mut context(&project), base, head)
                 .unwrap_err()
                 .to_string()
                 .contains("match the workspace version")
+        );
+    }
+
+    #[test]
+    fn rejects_release_notes_edited_by_hand() {
+        let mut environment = Environment::new();
+        let project = unreleased_project("1.2.3");
+        prepare_workspace(&project, &mut environment);
+        let base = initialize_git(&project, false);
+        prepare_notes(&project, "v1.2.3");
+        let notes = fs::read_to_string(project.root().join("releases.md")).unwrap();
+        project.write(
+            "releases.md",
+            &notes.replace("- fixture", "- A hand-written line."),
+        );
+        let sha = commit(&project);
+
+        let error = detect_release(&mut context(&project), base, sha).unwrap_err();
+        assert!(
+            error.to_string().contains("A hand-written line."),
+            "{error}"
         );
     }
 

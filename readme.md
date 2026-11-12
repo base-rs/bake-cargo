@@ -164,6 +164,16 @@ Prepare a release with `cargo bake cargo:release:patch` (or `minor`, `major`, or
 
 See [releases.md](releases.md) for the full release history.
 
+### v0.11.0
+
+**Breaking changes**
+
+- `cargo:release:detect` fails when the release's section of `releases.md` is not the one `releases:update` generates from the target branch's history. A release pull request whose notes were edited by hand, or that was opened before another change was merged, must be prepared again with `cargo:release:*` from the updated branch. ([#71](https://github.com/base-rs/bake-cargo/pull/71))
+
+**Changes**
+
+- Verify generated release notes when detecting a release, and refuse to start a release with nothing to release. ([#71](https://github.com/base-rs/bake-cargo/pull/71))
+
 ### v0.10.0
 
 - Allow only squash merges in `cargo:setup:github:apply`, which now disables merge commits and rebase merging in the repository settings and allows only `squash` in the branch ruleset's pull request rule, so release notes can be generated from squash commit subjects. Rerun the task, after reviewing `cargo:setup:github:plan`, to update an existing repository.
@@ -173,11 +183,6 @@ See [releases.md](releases.md) for the full release history.
 
 - Install Bake launcher 0.20.2 in generated `publish.yml` and `release-artifacts.yml` workflows. Existing workflows keep their pinned version until regenerated with `--force true`, passing `cargo:setup:artifacts` its original `--environment` and `--secrets`, or until their `cargo install bake --version` lines are updated.
 - Require `bake` 0.20 or later, instead of any 0.x version, so that Cargo resolves this crate to the same `bake` as a task package that requires `bake` 0.20.2. In a workspace whose `rust-version` is below the 1.88 that `bake` 0.20.2 declares, Cargo resolved the old requirement to `bake` 0.19.2, which declares none, and the task package failed to compile against two `bake` versions.
-
-### v0.9.2
-
-- Refresh the bumped packages' versions in the repository's other tracked `Cargo.lock` files, such as those of benchmark or fuzz workspaces excluded from the released one, when a `cargo:release:*` task bumps the version, and commit them with the release. A lockfile changes only when its workspace reaches a bumped package through path dependencies, and only those packages' versions change, so `--locked` builds of nested workspaces keep working without amending the release commit by hand.
-- Declare Rust 1.88 as the minimum supported version in `rust-version`, as required by the let-chains in this crate and in `bake` 0.20, and by the `icu_*` crates that `ureq` uses through `url`.
 
 <!-- bake-readme:releases:end -->
 

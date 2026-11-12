@@ -7,4 +7,4 @@ publish = false
 [dependencies]
 base-project = ">=0.1.7"
 bake = ">=0.20, <1"
-bake_cargo = { package = "bake-cargo", version = "0.9.3", path = ".." }
+bake_cargo = { package = "bake-cargo", version = "0.10.0", path = ".." }

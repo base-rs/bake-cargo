@@ -104,14 +104,14 @@ pub(crate) fn effective_checks(checks: &[String]) -> Vec<String> {
 
 pub(crate) fn validate_setup(
     branch: &str,
-    approvals: u32,
+    approvals: Option<u32>,
     checks: &[String],
     reviewers: &[String],
     wait_timer: Option<u32>,
     environment: &str,
 ) -> Result<()> {
     validate_branch(branch)?;
-    if approvals > 6 {
+    if approvals.is_some_and(|approvals| approvals > 6) {
         return Err(Error::new(
             "GitHub rulesets allow between zero and six required pull request approvals",
         ));
@@ -315,17 +315,103 @@ fn require_team_access(
     )))
 }
 
+const BRANCH_RULESET: &str = "Socketry Cargo checks";
+const TAG_RULESET: &str = "Socketry Cargo release tags";
+
+/// A managed ruleset as it will be saved, and the ID of the existing ruleset it replaces.
+#[derive(Debug)]
+pub(crate) struct PlannedRuleset {
+    pub id: Option<u64>,
+    pub payload: JsonValue,
+}
+
+/// The managed branch and tag rulesets, built from the requested settings and the repository's existing rulesets.
+#[derive(Debug)]
+pub(crate) struct PlannedRulesets {
+    pub branch: PlannedRuleset,
+    pub tag: PlannedRuleset,
+}
+
+/// Read the existing managed rulesets and build the ones to save.
+///
+/// When `approvals` is `None`, an existing branch ruleset keeps its required approvals, and a new one requires none. Rules the managed rulesets do not set, such as a merge queue, are kept from the existing rulesets.
+pub(crate) fn plan_rulesets(
+    context: &Context,
+    repository: &Repository,
+    branch: &str,
+    approvals: Option<u32>,
+    checks: &[String],
+) -> Result<PlannedRulesets> {
+    let tag_prefix = crate::release_tag::tag_prefix(context)?;
+    let existing_branch = existing_ruleset(context, repository, BRANCH_RULESET)?;
+    let existing_tag = existing_ruleset(context, repository, TAG_RULESET)?;
+    let existing_branch_rules = existing_branch.as_ref().map(|(_, ruleset)| ruleset);
+    let approvals = approvals
+        .or_else(|| existing_approvals(existing_branch_rules))
+        .unwrap_or(0);
+    Ok(PlannedRulesets {
+        branch: PlannedRuleset {
+            id: existing_branch.as_ref().map(|(id, _)| *id),
+            payload: merge_ruleset(
+                branch_ruleset(branch, approvals, checks),
+                existing_branch_rules,
+            ),
+        },
+        tag: PlannedRuleset {
+            id: existing_tag.as_ref().map(|(id, _)| *id),
+            payload: merge_ruleset(
+                tag_ruleset(&tag_prefix),
+                existing_tag.as_ref().map(|(_, ruleset)| ruleset),
+            ),
+        },
+    })
+}
+
+/// The required approvals of an existing branch ruleset's pull request rule.
+fn existing_approvals(existing: Option<&JsonValue>) -> Option<u32> {
+    let count = existing?
+        .get("rules")?
+        .as_array()?
+        .iter()
+        .find(|rule| rule.get("type").and_then(JsonValue::as_str) == Some("pull_request"))?
+        .get("parameters")?
+        .get("required_approving_review_count")?
+        .as_u64()?;
+    u32::try_from(count).ok()
+}
+
+/// Keep the rules of an existing ruleset whose types the desired ruleset does not set, such as a merge queue, after the managed rules.
+fn merge_ruleset(mut desired: JsonValue, existing: Option<&JsonValue>) -> JsonValue {
+    let existing_rules = existing
+        .and_then(|ruleset| ruleset.get("rules"))
+        .and_then(JsonValue::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let rules = desired["rules"]
+        .as_array_mut()
+        .expect("managed rulesets list their rules");
+    let managed = rules
+        .iter()
+        .filter_map(|rule| rule.get("type").and_then(JsonValue::as_str))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    rules.extend(existing_rules.into_iter().filter(|rule| {
+        rule.get("type")
+            .and_then(JsonValue::as_str)
+            .is_some_and(|kind| !managed.iter().any(|managed| managed == kind))
+    }));
+    desired
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn setup_plan(
     repository: &Repository,
     branch: &str,
-    approvals: u32,
-    checks: &[String],
+    rulesets: &PlannedRulesets,
     reviewers: &ReviewerSet,
     teams_without_access: &[String],
     wait_timer: Option<u32>,
     environment: &str,
-    tag_prefix: &str,
 ) -> Value {
     let mut environment_settings = environment_payload(&reviewers.resolved, wait_timer, None);
     environment_settings["name"] = json!(environment);
@@ -337,8 +423,8 @@ pub(crate) fn setup_plan(
 
     json!({
         "repository": repository.full_name(),
-        "branch_ruleset": branch_ruleset(branch, approvals, checks),
-        "tag_ruleset": tag_ruleset(tag_prefix),
+        "branch_ruleset": rulesets.branch.payload,
+        "tag_ruleset": rulesets.tag.payload,
         "reviewers": {
             "configured": reviewers.configured,
             "resolved": reviewers.resolved,
@@ -347,16 +433,18 @@ pub(crate) fn setup_plan(
         "environment": environment_settings,
         "fork_pr_contributor_approval": {"approval_policy": fork_approval_policy(None)},
         "merge_settings": merge_settings(),
-        "preservation": "Existing environment settings are preserved unless overridden above. An environment that deploys from all branches is restricted to the deployment branches above; an existing branch policy is kept. An existing all_external_contributors fork approval policy is preserved.",
+        "preservation": "Existing managed rulesets keep the rules shown above that this task does not set, such as a merge queue, and the branch ruleset keeps its required approvals unless --approvals is passed. Existing environment settings are preserved unless overridden above. An environment that deploys from all branches is restricted to the deployment branches above; an existing branch policy is kept. An existing all_external_contributors fork approval policy is preserved.",
         "apply": "cargo:setup:github:apply",
     })
 }
 
 fn branch_ruleset(branch: &str, approvals: u32, checks: &[String]) -> JsonValue {
+    // Release notes are generated from squash commit subjects, so pull
+    // requests merge only by squashing, matching `merge_settings`.
     let mut rules = vec![json!({
         "type": "pull_request",
         "parameters": {
-            "allowed_merge_methods": ["squash", "rebase"],
+            "allowed_merge_methods": ["squash"],
             "dismiss_stale_reviews_on_push": true,
             "require_code_owner_review": false,
             "require_last_push_approval": false,
@@ -379,7 +467,7 @@ fn branch_ruleset(branch: &str, approvals: u32, checks: &[String]) -> JsonValue 
     // their own pull requests once checks pass. Restrict the bypass to pull
     // requests so branch rules continue to block direct pushes.
     json!({
-        "name": "Socketry Cargo checks",
+        "name": BRANCH_RULESET,
         "target": "branch",
         "enforcement": "active",
         "conditions": {"ref_name": {"include": [format!("refs/heads/{branch}")], "exclude": []}},
@@ -406,7 +494,7 @@ fn tag_ruleset(prefix: &str) -> JsonValue {
     // refuses a tag at a different commit, and `cargo:release:artifacts:detect`
     // only accepts a tag at a release commit on the release branch.
     json!({
-        "name": "Socketry Cargo release tags",
+        "name": TAG_RULESET,
         "target": "tag",
         "enforcement": "active",
         "conditions": {"ref_name": {"include": patterns, "exclude": []}},
@@ -526,12 +614,17 @@ fn fork_approval_policy(existing: Option<&str>) -> &'static str {
 const FIRST_TIME_CONTRIBUTORS: &str = "first_time_contributors";
 const ALL_EXTERNAL_CONTRIBUTORS: &str = "all_external_contributors";
 
-// A squash merge built from concatenated commit messages buries the
-// `Release:` trailer of a release pull request under later review commits,
-// where Git no longer parses it. Taking the title and body from the pull
-// request keeps the trailer at the end of the merged commit message.
+// Release notes are generated from squash commit subjects, so the
+// repository allows only squash merges. A squash merge built from
+// concatenated commit messages buries the `Release:` trailer of a release
+// pull request under later review commits, where Git no longer parses it.
+// Taking the title and body from the pull request keeps the trailer at the
+// end of the merged commit message.
 fn merge_settings() -> JsonValue {
     json!({
+        "allow_squash_merge": true,
+        "allow_merge_commit": false,
+        "allow_rebase_merge": false,
         "squash_merge_commit_title": "PR_TITLE",
         "squash_merge_commit_message": "PR_BODY",
     })
@@ -586,7 +679,7 @@ pub(crate) fn apply_setup(
     context: &Context,
     repository: &Repository,
     branch: &str,
-    approvals: u32,
+    approvals: Option<u32>,
     checks: &[String],
     reviewers: &ReviewerSet,
     wait_timer: Option<u32>,
@@ -603,11 +696,10 @@ pub(crate) fn apply_setup(
     }
     require_team_access(context, repository, reviewers)?;
     let existing_environment = existing_environment(context, repository, environment)?;
-    let branch_ruleset = branch_ruleset(branch, approvals, checks);
-    let tag_ruleset = tag_ruleset(&crate::release_tag::tag_prefix(context)?);
+    let rulesets = plan_rulesets(context, repository, branch, approvals, checks)?;
 
-    let branch_result = upsert_ruleset(context, repository, &branch_ruleset)?;
-    let tag_result = upsert_ruleset(context, repository, &tag_ruleset)?;
+    let branch_result = save_ruleset(context, repository, &rulesets.branch)?;
+    let tag_result = save_ruleset(context, repository, &rulesets.tag)?;
     let environment_body = environment_payload(
         &reviewers.resolved,
         wait_timer,
@@ -722,15 +814,12 @@ fn verify_environment_reviewers(
     )))
 }
 
-fn upsert_ruleset(
+/// Find the repository ruleset with a managed name, and read its rules, which GitHub's ruleset list leaves out.
+fn existing_ruleset(
     context: &Context,
     repository: &Repository,
-    desired: &JsonValue,
-) -> Result<JsonValue> {
-    let name = desired
-        .get("name")
-        .and_then(JsonValue::as_str)
-        .ok_or_else(|| Error::new("managed ruleset has no name"))?;
+    name: &str,
+) -> Result<Option<(u64, JsonValue)>> {
     let path = format!("repos/{}/rulesets?per_page=100", repository.full_name());
     let existing = github_api(context, "GET", &path, None)?;
     let rulesets = existing
@@ -746,17 +835,30 @@ fn upsert_ruleset(
         )));
     }
 
-    let payload = desired.clone();
-    if let Some(existing) = matches.first() {
-        let identifier = existing
-            .get("id")
-            .and_then(JsonValue::as_u64)
-            .ok_or_else(|| Error::new(format!("GitHub ruleset {name:?} has no numeric ID")))?;
+    let Some(existing) = matches.first() else {
+        return Ok(None);
+    };
+    let identifier = existing
+        .get("id")
+        .and_then(JsonValue::as_u64)
+        .ok_or_else(|| Error::new(format!("GitHub ruleset {name:?} has no numeric ID")))?;
+    let path = format!("repos/{}/rulesets/{identifier}", repository.full_name());
+    let ruleset = github_api(context, "GET", &path, None)?;
+    Ok(Some((identifier, ruleset)))
+}
+
+/// Replace the existing managed ruleset, or create it.
+fn save_ruleset(
+    context: &Context,
+    repository: &Repository,
+    ruleset: &PlannedRuleset,
+) -> Result<JsonValue> {
+    if let Some(identifier) = ruleset.id {
         let path = format!("repos/{}/rulesets/{identifier}", repository.full_name());
-        github_api(context, "PUT", &path, Some(&payload))
+        github_api(context, "PUT", &path, Some(&ruleset.payload))
     } else {
         let path = format!("repos/{}/rulesets", repository.full_name());
-        github_api(context, "POST", &path, Some(&payload))
+        github_api(context, "POST", &path, Some(&ruleset.payload))
     }
 }
 
@@ -874,12 +976,20 @@ mod tests {
     #[test]
     fn validates_repository_setup_inputs() {
         assert!(
-            validate_setup("main", 1, &[], &["User:123".to_owned()], None, "crates-io").is_ok()
+            validate_setup(
+                "main",
+                Some(1),
+                &[],
+                &["User:123".to_owned()],
+                None,
+                "crates-io"
+            )
+            .is_ok()
         );
         assert!(
             validate_setup(
                 "main",
-                1,
+                Some(1),
                 &[],
                 &["socketry/managers".to_owned()],
                 None,
@@ -888,16 +998,50 @@ mod tests {
             .is_ok()
         );
         assert!(
-            validate_setup("main", 1, &[], &["ioquatix".to_owned()], None, "crates-io").is_ok()
+            validate_setup(
+                "main",
+                Some(1),
+                &[],
+                &["ioquatix".to_owned()],
+                None,
+                "crates-io"
+            )
+            .is_ok()
         );
-        assert!(validate_setup("main", 1, &[], &[], None, "crates-io").is_err());
-        assert!(validate_setup("feature/release", 1, &[], &[], None, "crates-io").is_err());
-        assert!(validate_setup("main", 7, &[], &[], None, "crates-io").is_err());
-        assert!(validate_setup("main", 1, &[" ".to_owned()], &[], None, "crates-io").is_err());
+        assert!(validate_setup("main", Some(1), &[], &[], None, "crates-io").is_err());
+        assert!(validate_setup("feature/release", Some(1), &[], &[], None, "crates-io").is_err());
+        assert!(validate_setup("main", Some(7), &[], &[], None, "crates-io").is_err());
         assert!(
             validate_setup(
                 "main",
-                1,
+                None,
+                &[],
+                &["User:123".to_owned()],
+                None,
+                "crates-io"
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_setup(
+                "main",
+                Some(7),
+                &[],
+                &["User:123".to_owned()],
+                None,
+                "crates-io"
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("between zero and six")
+        );
+        assert!(
+            validate_setup("main", Some(1), &[" ".to_owned()], &[], None, "crates-io").is_err()
+        );
+        assert!(
+            validate_setup(
+                "main",
+                Some(1),
                 &[],
                 &["Team:not-a-number".to_owned()],
                 None,
@@ -905,12 +1049,12 @@ mod tests {
             )
             .is_err()
         );
-        assert!(validate_setup("main", 1, &[], &[], Some(43_201), "crates-io").is_err());
-        assert!(validate_setup("main", 1, &[], &[], None, "crates/io").is_err());
+        assert!(validate_setup("main", Some(1), &[], &[], Some(43_201), "crates-io").is_err());
+        assert!(validate_setup("main", Some(1), &[], &[], None, "crates/io").is_err());
         assert!(
             validate_setup(
                 "main",
-                1,
+                Some(1),
                 &[],
                 &[
                     "a".to_owned(),
@@ -929,7 +1073,7 @@ mod tests {
         assert!(
             validate_setup(
                 "main",
-                1,
+                Some(1),
                 &[],
                 &["User:123".to_owned()],
                 Some(43_201),
@@ -937,7 +1081,7 @@ mod tests {
             )
             .is_err()
         );
-        assert!(validate_setup("main", 1, &[], &["User:123".to_owned()], None, "").is_err());
+        assert!(validate_setup("main", Some(1), &[], &["User:123".to_owned()], None, "").is_err());
     }
 
     #[test]
@@ -1346,41 +1490,53 @@ mod tests {
     }
 
     #[test]
-    fn creates_and_updates_rulesets_by_their_managed_name() {
+    fn reads_and_saves_rulesets_by_their_managed_name() {
         let mut environment = Environment::new();
         let project = Project::new();
         with_fake_gh(
             &project,
             &mut environment,
-            "#!/bin/sh\ncase \"$3 $4\" in\n  'GET repos/socketry/example/rulesets?per_page=100') printf '%s' '[]' ;;\n  'POST repos/socketry/example/rulesets') cat >/dev/null; printf '%s' '{\"id\":7}' ;;\n  *) echo unexpected-request >&2; exit 1 ;;\nesac\n",
+            "#!/bin/sh\ncase \"$3 $4\" in\n  'GET repos/socketry/example/rulesets?per_page=100') printf '%s' '[]' ;;\n  'POST repos/socketry/example/rulesets') cat > requested-ruleset.json; printf '%s' '{\"id\":7}' ;;\n  *) echo unexpected-request >&2; exit 1 ;;\nesac\n",
         );
         let repository = Repository {
             owner: "socketry".to_owned(),
             name: "example".to_owned(),
         };
+        assert!(
+            existing_ruleset(&project.context(), &repository, BRANCH_RULESET)
+                .unwrap()
+                .is_none()
+        );
+        let created = PlannedRuleset {
+            id: None,
+            payload: branch_ruleset("main", 1, &[]),
+        };
         assert_eq!(
-            upsert_ruleset(
-                &project.context(),
-                &repository,
-                &branch_ruleset("main", 1, &[])
-            )
-            .unwrap(),
+            save_ruleset(&project.context(), &repository, &created).unwrap(),
             json!({"id": 7})
         );
+        let requested: JsonValue = serde_json::from_slice(
+            &std::fs::read(project.root().join("requested-ruleset.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(requested, created.payload);
 
         let existing = Project::new();
         with_fake_gh(
             &existing,
             &mut environment,
-            "#!/bin/sh\ncase \"$3 $4\" in\n  'GET repos/socketry/example/rulesets?per_page=100') printf '%s' '[{\"name\":\"Socketry Cargo checks\",\"id\":42}]' ;;\n  'PUT repos/socketry/example/rulesets/42') cat >/dev/null; printf '%s' '{\"updated\":true}' ;;\n  *) echo unexpected-request >&2; exit 1 ;;\nesac\n",
+            "#!/bin/sh\ncase \"$3 $4\" in\n  'GET repos/socketry/example/rulesets?per_page=100') printf '%s' '[{\"name\":\"Other\",\"id\":41},{\"name\":\"Socketry Cargo checks\",\"id\":42}]' ;;\n  'GET repos/socketry/example/rulesets/42') printf '%s' '{\"id\":42,\"rules\":[]}' ;;\n  'PUT repos/socketry/example/rulesets/42') cat >/dev/null; printf '%s' '{\"updated\":true}' ;;\n  *) echo unexpected-request >&2; exit 1 ;;\nesac\n",
         );
         assert_eq!(
-            upsert_ruleset(
-                &existing.context(),
-                &repository,
-                &branch_ruleset("main", 1, &[])
-            )
-            .unwrap(),
+            existing_ruleset(&existing.context(), &repository, BRANCH_RULESET).unwrap(),
+            Some((42, json!({"id": 42, "rules": []})))
+        );
+        let updated = PlannedRuleset {
+            id: Some(42),
+            payload: branch_ruleset("main", 1, &[]),
+        };
+        assert_eq!(
+            save_ruleset(&existing.context(), &repository, &updated).unwrap(),
             json!({"updated": true})
         );
     }
@@ -1392,12 +1548,6 @@ mod tests {
             owner: "socketry".to_owned(),
             name: "example".to_owned(),
         };
-        assert!(
-            upsert_ruleset(&bake::Registry::new().context("."), &repository, &json!({}))
-                .unwrap_err()
-                .to_string()
-                .contains("managed ruleset has no name")
-        );
         for (response, expected) in [
             (
                 "[{\"name\":\"Socketry Cargo checks\",\"id\":42},{\"name\":\"Socketry Cargo checks\",\"id\":43}]",
@@ -1413,16 +1563,184 @@ mod tests {
                 &format!("#!/bin/sh\nprintf '%s' '{response}'\n"),
             );
             assert!(
-                upsert_ruleset(
-                    &project.context(),
-                    &repository,
-                    &branch_ruleset("main", 1, &[])
-                )
-                .unwrap_err()
-                .to_string()
-                .contains(expected)
+                existing_ruleset(&project.context(), &repository, BRANCH_RULESET)
+                    .unwrap_err()
+                    .to_string()
+                    .contains(expected)
             );
         }
+
+        let unreadable = Project::new();
+        with_fake_gh(
+            &unreadable,
+            &mut environment,
+            "#!/bin/sh\ncase \"$3 $4\" in\n  'GET repos/socketry/example/rulesets?per_page=100') printf '%s' '[{\"name\":\"Socketry Cargo checks\",\"id\":42}]' ;;\n  *) echo ruleset read denied >&2; exit 1 ;;\nesac\n",
+        );
+        assert!(
+            existing_ruleset(&unreadable.context(), &repository, BRANCH_RULESET)
+                .unwrap_err()
+                .to_string()
+                .contains("ruleset read denied")
+        );
+    }
+
+    /// GitHub's details of a branch ruleset with a merge queue and one required approval, as saved by an earlier setup that also allowed rebase merges.
+    fn existing_branch_ruleset_with_merge_queue() -> JsonValue {
+        json!({
+            "id": 42,
+            "name": "Socketry Cargo checks",
+            "target": "branch",
+            "enforcement": "active",
+            "rules": [
+                {"type": "pull_request", "parameters": {
+                    "allowed_merge_methods": ["squash", "rebase"],
+                    "required_approving_review_count": 1,
+                    "required_review_thread_resolution": true,
+                }},
+                {"type": "required_status_checks", "parameters": {
+                    "required_status_checks": [{"context": "old"}],
+                }},
+                {"type": "non_fast_forward"},
+                {"type": "merge_queue", "parameters": {
+                    "merge_method": "SQUASH",
+                    "max_entries_to_build": 5,
+                    "min_entries_to_merge": 1,
+                    "max_entries_to_merge": 5,
+                    "min_entries_to_merge_wait_minutes": 5,
+                    "grouping_strategy": "ALLGREEN",
+                    "check_response_timeout_minutes": 60,
+                }},
+            ],
+        })
+    }
+
+    #[test]
+    fn plans_squash_only_rulesets_that_keep_a_merge_queue_and_required_approvals() {
+        let mut environment = Environment::new();
+        let project = Project::new();
+        project.single_package("fixture", "1.2.3");
+        project.cargo_proxy(&mut environment, None);
+        let branch_details = existing_branch_ruleset_with_merge_queue().to_string();
+        let tag_details = json!({
+            "id": 43,
+            "rules": [{"type": "deletion"}, {"type": "required_signatures"}],
+        })
+        .to_string();
+        with_fake_gh(
+            &project,
+            &mut environment,
+            &format!(
+                "#!/bin/sh\ncase \"$3 $4\" in\n  'GET repos/socketry/example/rulesets?per_page=100') printf '%s' '[{{\"name\":\"Socketry Cargo checks\",\"id\":42}},{{\"name\":\"Socketry Cargo release tags\",\"id\":43}}]' ;;\n  'GET repos/socketry/example/rulesets/42') printf '%s' '{branch_details}' ;;\n  'GET repos/socketry/example/rulesets/43') printf '%s' '{tag_details}' ;;\n  *) echo unexpected-request >&2; exit 1 ;;\nesac\n"
+            ),
+        );
+        let repository = Repository {
+            owner: "socketry".to_owned(),
+            name: "example".to_owned(),
+        };
+        let checks = effective_checks(&[]);
+
+        let rulesets =
+            plan_rulesets(&project.context(), &repository, "main", None, &checks).unwrap();
+        assert_eq!(rulesets.branch.id, Some(42));
+        assert_eq!(rulesets.tag.id, Some(43));
+        let mut expected = branch_ruleset("main", 1, &checks);
+        expected["rules"]
+            .as_array_mut()
+            .unwrap()
+            .push(existing_branch_ruleset_with_merge_queue()["rules"][3].clone());
+        assert_eq!(rulesets.branch.payload, expected);
+        let pull_request = &rulesets.branch.payload["rules"][0]["parameters"];
+        assert_eq!(pull_request["allowed_merge_methods"], json!(["squash"]));
+        assert_eq!(pull_request["required_approving_review_count"], 1);
+        assert_eq!(
+            rulesets.branch.payload["rules"][3]["parameters"]["merge_method"],
+            "SQUASH"
+        );
+        assert_eq!(
+            rulesets.tag.payload["rules"],
+            json!([{"type": "deletion"}, {"type": "update"}, {"type": "required_signatures"}])
+        );
+
+        // An explicit approval count replaces the existing one; the merge queue stays.
+        let rulesets =
+            plan_rulesets(&project.context(), &repository, "main", Some(0), &checks).unwrap();
+        assert_eq!(
+            rulesets.branch.payload["rules"][0]["parameters"]["required_approving_review_count"],
+            0
+        );
+        assert_eq!(rulesets.branch.payload["rules"][3]["type"], "merge_queue");
+    }
+
+    #[test]
+    fn plans_new_rulesets_with_no_required_approvals() {
+        let mut environment = Environment::new();
+        let project = Project::new();
+        project.single_package("fixture", "1.2.3");
+        project.cargo_proxy(&mut environment, None);
+        with_fake_gh(
+            &project,
+            &mut environment,
+            "#!/bin/sh\ncase \"$3 $4\" in\n  'GET repos/socketry/example/rulesets?per_page=100') printf '%s' '[]' ;;\n  *) echo unexpected-request >&2; exit 1 ;;\nesac\n",
+        );
+        let repository = Repository {
+            owner: "socketry".to_owned(),
+            name: "example".to_owned(),
+        };
+        let rulesets = plan_rulesets(
+            &project.context(),
+            &repository,
+            "main",
+            None,
+            &["check".to_owned()],
+        )
+        .unwrap();
+        assert_eq!(rulesets.branch.id, None);
+        assert_eq!(rulesets.tag.id, None);
+        assert_eq!(
+            rulesets.branch.payload,
+            branch_ruleset("main", 0, &["check".to_owned()])
+        );
+        assert_eq!(rulesets.tag.payload, tag_ruleset("v"));
+    }
+
+    #[test]
+    fn reads_required_approvals_only_from_a_valid_pull_request_rule() {
+        assert_eq!(
+            existing_approvals(Some(&existing_branch_ruleset_with_merge_queue())),
+            Some(1)
+        );
+        assert_eq!(existing_approvals(None), None);
+        for existing in [
+            json!({}),
+            json!({"rules": {}}),
+            json!({"rules": [{"type": "non_fast_forward"}]}),
+            json!({"rules": [{"type": "pull_request"}]}),
+            json!({"rules": [{"type": "pull_request", "parameters": {}}]}),
+            json!({"rules": [{"type": "pull_request", "parameters": {"required_approving_review_count": "1"}}]}),
+            json!({"rules": [{"type": "pull_request", "parameters": {"required_approving_review_count": 4_294_967_296_u64}}]}),
+        ] {
+            assert_eq!(existing_approvals(Some(&existing)), None, "{existing}");
+        }
+    }
+
+    #[test]
+    fn keeps_only_typed_rules_the_managed_ruleset_does_not_set() {
+        let desired = tag_ruleset("v");
+        assert_eq!(merge_ruleset(desired.clone(), None), desired);
+        assert_eq!(merge_ruleset(desired.clone(), Some(&json!({}))), desired);
+        let merged = merge_ruleset(
+            desired,
+            Some(&json!({"rules": [
+                {"type": "deletion"},
+                {"parameters": {}},
+                {"type": 7},
+                {"type": "creation"},
+            ]})),
+        );
+        assert_eq!(
+            merged["rules"],
+            json!([{"type": "deletion"}, {"type": "update"}, {"type": "creation"}])
+        );
     }
 
     #[test]
@@ -1435,16 +1753,24 @@ mod tests {
             configured: vec!["socketry/managers".to_owned()],
             resolved: vec!["Team:123".to_owned()],
         };
+        let rulesets = PlannedRulesets {
+            branch: PlannedRuleset {
+                id: Some(42),
+                payload: branch_ruleset("main", 2, &["test".to_owned()]),
+            },
+            tag: PlannedRuleset {
+                id: None,
+                payload: tag_ruleset("base-v"),
+            },
+        };
         let plan = setup_plan(
             &repository,
             "main",
-            2,
-            &["test".to_owned()],
+            &rulesets,
             &reviewers,
             &["socketry/managers".to_owned()],
             Some(10),
             "crates-io",
-            "base-v",
         );
 
         assert_eq!(plan["repository"], "socketry/example");
@@ -1476,8 +1802,14 @@ mod tests {
             "first_time_contributors"
         );
         assert_eq!(
-            plan["merge_settings"]["squash_merge_commit_message"],
-            "PR_BODY"
+            plan["merge_settings"],
+            json!({
+                "allow_squash_merge": true,
+                "allow_merge_commit": false,
+                "allow_rebase_merge": false,
+                "squash_merge_commit_title": "PR_TITLE",
+                "squash_merge_commit_message": "PR_BODY",
+            })
         );
     }
 
@@ -1507,7 +1839,7 @@ mod tests {
             &project.context(),
             &repository,
             "main",
-            1,
+            Some(1),
             &["check".to_owned()],
             &explicit_reviewers(&["User:123"]),
             None,
@@ -1552,7 +1884,13 @@ mod tests {
         .unwrap();
         assert_eq!(
             merge_settings_body,
-            json!({"squash_merge_commit_title": "PR_TITLE", "squash_merge_commit_message": "PR_BODY"})
+            json!({
+                "allow_squash_merge": true,
+                "allow_merge_commit": false,
+                "allow_rebase_merge": false,
+                "squash_merge_commit_title": "PR_TITLE",
+                "squash_merge_commit_message": "PR_BODY",
+            })
         );
         assert_eq!(result["merge_settings"], merge_settings_body);
     }
@@ -1575,7 +1913,13 @@ case "$3 $4" in
     printf '%s' "$count" > "$BAKE_TEST_RULESET_GETS"
     if [ "$count" = "$BAKE_TEST_SETUP_FAILURE" ]; then echo 'injected failure' >&2; exit 1; fi
     printf '%s' '[]' ;;
-  'POST repos/socketry/example/rulesets') cat >/dev/null; printf '%s' '{}' ;;
+  'POST repos/socketry/example/rulesets')
+    cat >/dev/null
+    count=$(cat "$BAKE_TEST_RULESET_POSTS" 2>/dev/null || echo 0)
+    count=$((count + 1))
+    printf '%s' "$count" > "$BAKE_TEST_RULESET_POSTS"
+    if [ "save-$count" = "$BAKE_TEST_SETUP_FAILURE" ]; then echo 'injected failure' >&2; exit 1; fi
+    printf '%s' '{}' ;;
   'PUT repos/socketry/example/environments/crates-io')
     cat >/dev/null
     if [ "$BAKE_TEST_SETUP_FAILURE" = environment-update ]; then echo 'injected failure' >&2; exit 1; fi
@@ -1605,6 +1949,8 @@ esac
 "#;
         with_fake_gh(&project, &mut environment, script);
         environment.set("BAKE_TEST_RULESET_GETS", gets_file.as_os_str());
+        let posts_file = project.root().join("ruleset-posts");
+        environment.set("BAKE_TEST_RULESET_POSTS", posts_file.as_os_str());
         let repository = Repository {
             owner: "socketry".to_owned(),
             name: "example".to_owned(),
@@ -1614,6 +1960,8 @@ esac
             "environments",
             "1",
             "2",
+            "save-1",
+            "save-2",
             "environment-update",
             "deployment-branches-read",
             "deployment-branch-create",
@@ -1623,13 +1971,14 @@ esac
             "environment-read-back",
         ] {
             let _ = std::fs::remove_file(&gets_file);
+            let _ = std::fs::remove_file(&posts_file);
             environment.set("BAKE_TEST_SETUP_FAILURE", failure);
             assert!(
                 apply_setup(
                     &project.context(),
                     &repository,
                     "main",
-                    1,
+                    Some(1),
                     &["check".to_owned()],
                     &explicit_reviewers(&["User:123"]),
                     None,
@@ -1652,7 +2001,7 @@ esac
                 &project.context(),
                 &repository,
                 "main",
-                1,
+                Some(1),
                 &["check".to_owned()],
                 &explicit_reviewers(&["User:123"]),
                 None,
@@ -1680,17 +2029,21 @@ esac
         with_fake_gh(
             &project,
             &mut environment,
-            "#!/bin/sh\ncase \"$3 $4\" in\n  'GET repos/socketry/example/environments?per_page=100') printf '%s' '{\"environments\":[{\"name\":\"crates-io\"}]}' ;;\n  'GET repos/socketry/example/environments/crates-io') printf '%s' '{\"protection_rules\":[{\"type\":\"wait_timer\",\"wait_timer\":5},{\"type\":\"required_reviewers\",\"prevent_self_review\":true,\"reviewers\":[{\"type\":\"User\",\"reviewer\":{\"id\":77}}]}],\"deployment_branch_policy\":{\"protected_branches\":true}}' ;;\n  'GET repos/socketry/example/rulesets?per_page=100') printf '%s' '[{\"name\":\"Socketry Cargo checks\",\"id\":42},{\"name\":\"Socketry Cargo release tags\",\"id\":43}]' ;;\n  'PUT repos/socketry/example/rulesets/42'|'PUT repos/socketry/example/rulesets/43') cat >/dev/null; printf '%s' '{\"updated\":true}' ;;\n  'PUT repos/socketry/example/environments/crates-io') cat > requested-environment.json; printf '%s' '{}' ;;\n  'GET repos/socketry/example/actions/permissions/fork-pr-contributor-approval') printf '%s' '{\"approval_policy\":\"all_external_contributors\"}' ;;\n  'PUT repos/socketry/example/actions/permissions/fork-pr-contributor-approval') cat > requested-fork-approval.json ;;\n  'PATCH repos/socketry/example') cat >/dev/null; printf '%s' '{}' ;;\n  *) echo unexpected-request >&2; exit 1 ;;\nesac\n",
+            "#!/bin/sh\ncase \"$3 $4\" in\n  'GET repos/socketry/example/environments?per_page=100') printf '%s' '{\"environments\":[{\"name\":\"crates-io\"}]}' ;;\n  'GET repos/socketry/example/environments/crates-io') printf '%s' '{\"protection_rules\":[{\"type\":\"wait_timer\",\"wait_timer\":5},{\"type\":\"required_reviewers\",\"prevent_self_review\":true,\"reviewers\":[{\"type\":\"User\",\"reviewer\":{\"id\":77}}]}],\"deployment_branch_policy\":{\"protected_branches\":true}}' ;;\n  'GET repos/socketry/example/rulesets?per_page=100') printf '%s' '[{\"name\":\"Socketry Cargo checks\",\"id\":42},{\"name\":\"Socketry Cargo release tags\",\"id\":43}]' ;;\n  'GET repos/socketry/example/rulesets/42') printf '%s' \"$BAKE_TEST_BRANCH_RULESET\" ;;\n  'GET repos/socketry/example/rulesets/43') printf '%s' '{\"rules\":[{\"type\":\"deletion\"}]}' ;;\n  'PUT repos/socketry/example/rulesets/42') cat > requested-branch-ruleset.json; printf '%s' '{\"updated\":true}' ;;\n  'PUT repos/socketry/example/rulesets/43') cat > requested-tag-ruleset.json; printf '%s' '{\"updated\":true}' ;;\n  'PUT repos/socketry/example/environments/crates-io') cat > requested-environment.json; printf '%s' '{}' ;;\n  'GET repos/socketry/example/actions/permissions/fork-pr-contributor-approval') printf '%s' '{\"approval_policy\":\"all_external_contributors\"}' ;;\n  'PUT repos/socketry/example/actions/permissions/fork-pr-contributor-approval') cat > requested-fork-approval.json ;;\n  'PATCH repos/socketry/example') cat >/dev/null; printf '%s' '{}' ;;\n  *) echo unexpected-request >&2; exit 1 ;;\nesac\n",
         );
         let repository = Repository {
             owner: "socketry".to_owned(),
             name: "example".to_owned(),
         };
+        environment.set(
+            "BAKE_TEST_BRANCH_RULESET",
+            existing_branch_ruleset_with_merge_queue().to_string(),
+        );
         apply_setup(
             &project.context(),
             &repository,
             "main",
-            1,
+            None,
             &["check".to_owned()],
             &explicit_reviewers(&[]),
             None,
@@ -1716,6 +2069,24 @@ esac
             fork_approval_body,
             json!({"approval_policy": "all_external_contributors"})
         );
+
+        // The branch ruleset becomes squash-only, keeps its merge queue, and, without
+        // --approvals, keeps its required approval.
+        let branch_body: JsonValue = serde_json::from_slice(
+            &std::fs::read(project.root().join("requested-branch-ruleset.json")).unwrap(),
+        )
+        .unwrap();
+        let mut expected = branch_ruleset("main", 1, &["check".to_owned()]);
+        expected["rules"]
+            .as_array_mut()
+            .unwrap()
+            .push(existing_branch_ruleset_with_merge_queue()["rules"][3].clone());
+        assert_eq!(branch_body, expected);
+        let tag_body: JsonValue = serde_json::from_slice(
+            &std::fs::read(project.root().join("requested-tag-ruleset.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(tag_body, tag_ruleset("v"));
     }
 
     #[test]
@@ -1821,7 +2192,7 @@ esac
                 &project.context(),
                 &repository,
                 "main",
-                1,
+                Some(1),
                 &["check".to_owned()],
                 &explicit_reviewers(&["User:123"]),
                 None,
@@ -1836,6 +2207,11 @@ esac
     #[test]
     fn plans_ruleset_and_tag_protection_shapes() {
         let branch = branch_ruleset("main", 0, &["test".to_owned()]);
+        assert_eq!(branch["name"], "Socketry Cargo checks");
+        assert_eq!(
+            branch["rules"][0]["parameters"]["allowed_merge_methods"],
+            json!(["squash"])
+        );
         assert_eq!(
             branch["conditions"]["ref_name"]["include"][0],
             "refs/heads/main"
@@ -1914,7 +2290,7 @@ esac
             &project.context(),
             &repository,
             "main",
-            0,
+            Some(0),
             &["check".to_owned()],
             &reviewers,
             None,
@@ -2081,7 +2457,7 @@ esac
             &project.context(),
             &repository,
             "main",
-            0,
+            Some(0),
             &["check".to_owned()],
             &reviewers,
             None,

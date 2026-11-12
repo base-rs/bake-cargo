@@ -433,7 +433,7 @@ pub(crate) fn setup_plan(
         "environment": environment_settings,
         "fork_pr_contributor_approval": {"approval_policy": fork_approval_policy(None)},
         "merge_settings": merge_settings(),
-        "preservation": "Existing managed rulesets keep the rules shown above that this task does not set, such as a merge queue, and the branch ruleset keeps its required approvals unless --approvals is passed. Existing environment settings are preserved unless overridden above. An environment that deploys from all branches is restricted to the deployment branches above; an existing branch policy is kept. An existing all_external_contributors fork approval policy is preserved.",
+        "preservation": "Existing managed rulesets keep the rules shown above that this task does not set, such as a merge queue, and the branch ruleset keeps its required approvals unless --approvals is passed. Their conditions, bypass actors, and the rules this task sets, including the required status checks, are replaced with those shown above, so a ruleset saved by an older version or edited by hand gains the administrator pull request bypass and the release tag update rule. Existing environment settings are preserved unless overridden above. An environment that deploys from all branches is restricted to the deployment branches above; an existing branch policy is kept. An existing all_external_contributors fork approval policy is preserved.",
         "apply": "cargo:setup:github:apply",
     })
 }
